@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Finished commands leave no Node behind.</strong><br>
-  A Claude Code mod that ends the Node processes a finished command left running, such as test runners, their workers and esbuild.
+  A Claude Code mod that ends the Node processes a finished command left running, such as test runners, their workers and esbuild, and finds orphaned Node however it was left with <code>/node-close</code>.
 </p>
 
 <p align="center">
@@ -26,7 +26,9 @@
 
 *Illustration of a session before and after.*
 
-When Claude runs tests or builds, the command can finish while Node keeps running: a test runner that never exits, a worker pool, an esbuild service. Claude Code moves on to the next step, and the leftovers pile up and hold memory. node-close checks right after each finished shell command and ends the Node processes that command started and left behind.
+When Claude runs tests or builds, the command can finish while Node keeps running: a test runner that never exits, a worker pool, an esbuild service. Claude Code moves on to the next step, and the leftovers pile up and hold memory. node-close checks right after each finished shell command and ends the Node processes that command started and left behind. It follows background commands too, and ends what they leave once they stop or the session ends.
+
+Some leftovers outlive any hook: Claude Code killed outright, an IDE task, another tool. For those, `/node-close` lists every Node whose parent is gone, with its CPU use and run time, and `/node-close kill` ends the ones you choose.
 
 > [!NOTE]
 > node-close is built on Claude Code's function-hooks mod API, which is in early access and may change between releases.
