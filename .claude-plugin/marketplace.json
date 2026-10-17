@@ -1,0 +1,9 @@
+{
+  "name": "node-close",
+  "description": "A Claude Code mod that ends the Node processes a finished command left running",
+  "owner": {
+    "name": "AnnihilationWizard",
+    "url": "https://github.com/AnnihilationWizard"
+  },
+  "plugins": [{ "name": "node-close", "source": "./" }]
+}

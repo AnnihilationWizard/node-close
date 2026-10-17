@@ -1,11 +1,13 @@
 {
   "name": "node-close",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "End the Node processes a finished command left running, such as test runners and their workers",
   "author": {
     "name": "AnnihilationWizard",
     "url": "https://github.com/AnnihilationWizard"
   },
+  "homepage": "https://github.com/AnnihilationWizard/node-close",
+  "repository": "https://github.com/AnnihilationWizard/node-close",
   "license": "MIT",
   "keywords": ["claude-code", "mod", "node", "test", "cleanup", "windows", "powershell"]
 }

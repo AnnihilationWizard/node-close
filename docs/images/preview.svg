@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="560" viewBox="0 0 960 560" role="img" aria-labelledby="title desc">
+  <title id="title">node-close before and after</title>
+  <desc id="desc">Left: without node-close, each finished test run Claude starts leaves Node processes, workers and esbuild running, and memory use climbs. Right: with node-close, the leftovers of each finished run are ended right after it, a toast reports the count, Claude is told which PIDs were closed, and nothing piles up.</desc>
+  <style>
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 14px; }
+    .label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; }
+    .fg { fill: #e6edf3; }
+    .dim { fill: #8b949e; }
+    .tool { fill: #e6edf3; font-weight: 700; }
+    .dot { fill: #3fb950; }
+    .err { fill: #ff7b72; }
+    .ok { fill: #3fb950; }
+  </style>
+  <rect width="960" height="560" rx="14" fill="#0d1117"/>
+  <rect x="0.5" y="0.5" width="959" height="559" rx="14" fill="none" stroke="#30363d"/>
+  <circle cx="24" cy="22" r="6" fill="#ff5f57"/>
+  <circle cx="44" cy="22" r="6" fill="#febc2e"/>
+  <circle cx="64" cy="22" r="6" fill="#28c840"/>
+  <line x1="480" y1="44" x2="480" y2="536" stroke="#30363d"/>
+
+  <!-- Before -->
+  <text x="32" y="70" class="label" fill="#f85149">BEFORE</text>
+  <g class="mono">
+    <text x="32" y="106"><tspan class="dot">⏺</tspan><tspan class="tool" dx="8">Bash</tspan><tspan class="fg">(npx vitest run)</tspan></text>
+    <text x="48" y="132" class="dim">⎿  ✓ 48 passed</text>
+    <text x="32" y="174"><tspan class="dot">⏺</tspan><tspan class="tool" dx="8">Bash</tspan><tspan class="fg">(npx vitest run)</tspan></text>
+    <text x="48" y="200" class="dim">⎿  ✓ 48 passed</text>
+    <text x="32" y="242"><tspan class="dot">⏺</tspan><tspan class="tool" dx="8">Bash</tspan><tspan class="fg">(npm test)</tspan></text>
+    <text x="48" y="268" class="dim">⎿  ✓ 48 passed</text>
+
+    <text x="32" y="322" class="dim">Still running after the commands ended:</text>
+    <text x="48" y="350" class="fg">node vitest run</text>
+    <text x="300" y="350" class="err">×3</text>
+    <text x="48" y="374" class="fg">node tinypool/worker.js</text>
+    <text x="300" y="374" class="err">×12</text>
+    <text x="48" y="398" class="fg">esbuild --service</text>
+    <text x="300" y="398" class="err">×3</text>
+  </g>
+  <rect x="32" y="452" width="416" height="12" rx="6" fill="#21262d"/>
+  <rect x="32" y="452" width="368" height="12" rx="6" fill="#f85149"/>
+  <text x="32" y="492" class="mono dim">Memory held by leftovers: <tspan class="err">940 MB</tspan>, growing</text>
+
+  <!-- After -->
+  <text x="512" y="70" class="label" fill="#3fb950">AFTER</text>
+  <g class="mono">
+    <text x="512" y="106"><tspan class="dot">⏺</tspan><tspan class="tool" dx="8">Bash</tspan><tspan class="fg">(npx vitest run)</tspan></text>
+    <text x="528" y="132" class="dim">⎿  ✓ 48 passed</text>
+    <text x="512" y="198"><tspan class="dot">⏺</tspan><tspan class="tool" dx="8">Bash</tspan><tspan class="fg">(npx vitest run)</tspan></text>
+    <text x="528" y="224" class="dim">⎿  ✓ 48 passed</text>
+    <text x="512" y="290"><tspan class="dot">⏺</tspan><tspan class="tool" dx="8">Bash</tspan><tspan class="fg">(npm test)</tspan></text>
+    <text x="528" y="316" class="dim">⎿  ✓ 48 passed</text>
+  </g>
+  <rect x="512" y="452" width="416" height="12" rx="6" fill="#21262d"/>
+  <rect x="512" y="452" width="12" height="12" rx="6" fill="#3fb950"/>
+  <text x="512" y="492" class="mono dim">Nothing left once a command finishes</text>
+  <text x="512" y="396" class="mono"><tspan class="ok">✓ node-close:</tspan><tspan class="dim" dx="8">closed 6 Node processes</tspan></text>
+  <text x="512" y="420" class="mono dim">left by the last command</text>
+</svg>
