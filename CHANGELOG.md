@@ -13,3 +13,5 @@ Initial release of node-close by AnnihilationWizard.
 - Tests for leftover detection, ending, escalation and what is left alone, run with `claude plugin test`.
 
 Built on Claude Code's early-access function-hooks mod API.
+
+[1.0.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.0.0
