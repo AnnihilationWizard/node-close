@@ -1,6 +1,6 @@
 {
   "name": "node-close",
-  "description": "A Claude Code mod that ends the Node processes a finished command left running",
+  "description": "A Claude Code mod that ends the Node processes a finished command left running, such as test runners and esbuild; /node-close finds orphaned ones",
   "owner": {
     "name": "AnnihilationWizard",
     "url": "https://github.com/AnnihilationWizard"
