@@ -1,18 +1,19 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { isNode, leftovers, parsePs } from './register'
+import { SWEEP_MS, grow, isNode, isNodeFamily, leftovers, orphans, parsePs } from './register'
 
 const ps = (...rows: [number, number, string][]) => rows.map(([pid, ppid, c]) => `  ${pid}  ${ppid} ${c}`).join('\n')
 
-const CLAUDE: [number, number, string] = [70, 1, '/usr/local/bin/node /usr/local/bin/claude']
+const APP: [number, number, string] = [60, 1, '/Applications/Claude.app/Contents/MacOS/Claude']
+const CLAUDE: [number, number, string] = [70, 60, '/usr/local/bin/node /usr/local/bin/claude']
 const SERVER: [number, number, string] = [77, 1, '/usr/local/bin/node /Users/me/app/server.js']
 const SHELL = '/bin/zsh -c source ~/.claude/shell-snapshots/snapshot.sh && eval \'npx vitest run\''
 
-const IDLE = ps(CLAUDE, SERVER)
+const IDLE = ps(APP, CLAUDE, SERVER)
 // While `npx vitest run` runs: its shell, the runner and a worker.
-const RUNNING = ps(CLAUDE, SERVER, [880, 70, SHELL], [900, 880, '/usr/local/bin/node /Users/me/p/node_modules/.bin/vitest run'], [901, 900, '/usr/local/bin/node /Users/me/p/node_modules/tinypool/dist/worker.js'])
+const RUNNING = ps(APP, CLAUDE, SERVER, [880, 70, SHELL], [900, 880, '/usr/local/bin/node /Users/me/p/node_modules/.bin/vitest run'], [901, 900, '/usr/local/bin/node /Users/me/p/node_modules/tinypool/dist/worker.js'])
 // After it finished: the runner and its worker were re-parented to launchd, with an esbuild child.
-const LEFT = ps(CLAUDE, SERVER, [900, 1, '/usr/local/bin/node /Users/me/p/node_modules/.bin/vitest run'], [901, 900, '/usr/local/bin/node /Users/me/p/node_modules/tinypool/dist/worker.js'], [902, 900, '/Users/me/p/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.21.5 --ping'])
+const LEFT = ps(APP, CLAUDE, SERVER, [900, 1, '/usr/local/bin/node /Users/me/p/node_modules/.bin/vitest run'], [901, 900, '/usr/local/bin/node /Users/me/p/node_modules/tinypool/dist/worker.js'], [902, 900, '/Users/me/p/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.21.5 --ping'])
 
 test('tells Node from a shell that runs it', () => {
   expect(isNode('/usr/local/bin/node x.js')).toBe(true)
@@ -38,7 +39,11 @@ test('on Windows, counts a tree whose parent no longer exists', () => {
 
 // The engine beneath: `ps` answers from the tables in turn (the last repeats),
 // `kill` records its arguments and may change the table, Bash records what ran.
-const world = (on: On, tables: string[], opts: { result?: object; onKill?: (argv: readonly string[]) => void } = {}) => {
+const world = (
+  on: On,
+  tables: string[],
+  opts: { result?: object; onKill?: (argv: readonly string[]) => void; usage?: string; isClockMocked?: boolean } = {},
+) => {
   const kills: string[][] = []
   const ran: string[] = []
   const toasts: string[] = []
@@ -50,10 +55,13 @@ const world = (on: On, tables: string[], opts: { result?: object; onKill?: (argv
       opts.onKill?.(argv)
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
+    if (argv.includes('pid=,ppid=,pcpu=,etime=,command=')) {
+      return { value: { exitCode: 0, stdout: opts.usage ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     const stdout = tables[Math.min(i++, tables.length - 1)]!
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('clock.sleep', () => ({ value: undefined }))
+  if (opts.isClockMocked !== true) on('clock.sleep', () => ({ value: undefined }))
   on('ui.toast', ($, e) => {
     toasts.push((e as { text: string }).text)
     return { value: undefined } as never
@@ -76,7 +84,7 @@ test('ends the Node processes a finished test run left', async ($, on) => {
 })
 
 test('kills outright the ones that ignore TERM', async ($, on) => {
-  const stubborn = ps(CLAUDE, SERVER, [901, 900, '/usr/local/bin/node /Users/me/p/node_modules/tinypool/dist/worker.js'])
+  const stubborn = ps(APP, CLAUDE, SERVER, [901, 900, '/usr/local/bin/node /Users/me/p/node_modules/tinypool/dist/worker.js'])
   const tables = [IDLE, LEFT]
   const w = world(on, tables, { onKill: argv => tables.push(argv[1] === '-TERM' ? stubborn : IDLE) })
   const r = await $.tool.call({ tool: 'Bash', command: 'npm test' })
@@ -109,4 +117,91 @@ test('does not list processes for a command that cannot start Node', async ($, o
   await $.tool.call({ tool: 'Bash', command: 'git status && ls -la' })
   expect(w.kills).toEqual([])
   expect(w.ran).toEqual(['git status && ls -la'])
+})
+
+// The case from the field: `pnpm dev` ran as a background task; when it
+// stopped, `tsx watch` and the esbuild its app child had started were both
+// left to launchd, esbuild spinning.
+const TSX = '/usr/local/bin/node /Users/me/p/node_modules/.bin/../tsx/dist/cli.mjs watch src/index.ts'
+const ESBUILD = '/Users/me/p/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.28.2 --ping'
+const BG_SHELL = "/bin/zsh -c source ~/.claude/shell-snapshots/snapshot.sh && eval 'pnpm dev'"
+const DEV = ps(APP, CLAUDE, SERVER, [880, 70, BG_SHELL], [890, 880, '/usr/local/bin/node /usr/local/bin/pnpm dev'], [900, 890, TSX], [910, 900, '/usr/local/bin/node src/index.ts'], [911, 910, ESBUILD])
+const STRANDED = ps(APP, CLAUDE, SERVER, [900, 1, TSX], [911, 1, ESBUILD])
+
+test('counts a Node project\'s tools, such as esbuild, as Node', () => {
+  expect(isNodeFamily(ESBUILD)).toBe(true)
+  expect(isNodeFamily(TSX)).toBe(true)
+  expect(isNodeFamily('/usr/bin/python3 -m http.server')).toBe(false)
+  expect(isNodeFamily(BG_SHELL)).toBe(false)
+})
+
+test('counts an esbuild left on its own after its Node exited', () => {
+  const before = new Set(parsePs(IDLE).map(p => p.pid))
+  const left = parsePs(ps(APP, CLAUDE, SERVER, [911, 1, ESBUILD]))
+  expect(leftovers(before, left).map(p => p.pid)).toEqual([911])
+})
+
+test('lists orphaned Node anywhere, but never Claude Code or what it runs', () => {
+  const listing: [number, number, string] = [999, 70, 'ps -axww -o pid=,ppid=,command=']
+  const orphanedClaude = ps([70, 1, '/usr/local/bin/node /usr/local/bin/claude'], listing, [880, 70, BG_SHELL], [890, 880, 'node x.js'], [900, 1, TSX], [911, 1, ESBUILD])
+  expect(orphans(parsePs(orphanedClaude)).map(p => p.pid).sort()).toEqual([900, 911])
+})
+
+test('ends what a stopped background command left', async ($, on) => {
+  const clock = mock.clock(on)
+  const tables = [IDLE, DEV, DEV]
+  const w = world(on, tables, { result: { backgroundTaskId: 'b1' }, isClockMocked: true, onKill: () => tables.push(IDLE) })
+  await $.tool.call({ tool: 'Bash', command: 'pnpm dev', run_in_background: true } as never)
+  expect(w.kills).toEqual([])
+  // Still running: the first sweep keeps it.
+  await clock.advance(SWEEP_MS)
+  expect(w.kills).toEqual([])
+  // The task stops; its shell and pnpm go, tsx watch and esbuild are left.
+  tables.push(STRANDED)
+  await clock.advance(SWEEP_MS)
+  await clock.advance(1000)
+  expect(w.kills).toEqual([['kill', '-TERM', '900', '911']])
+  expect(w.toasts.join('\n')).toMatch(/closed 2 Node processes a stopped background command left/)
+  // Claude hears of it with the next shell command.
+  const r = await $.tool.call({ tool: 'Bash', command: 'git status' })
+  expect(r.context?.join('\n')).toMatch(/a background command stopped but left 2 Node processes running, now ended: 900/)
+})
+
+test('ends a background command\'s Node when the session ends', async ($, on) => {
+  const clock = mock.clock(on)
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }) as never)
+  const tables = [IDLE, DEV, DEV]
+  const w = world(on, tables, { result: { backgroundTaskId: 'b1' }, isClockMocked: true, onKill: () => tables.push(IDLE) })
+  await $.tool.call({ tool: 'Bash', command: 'pnpm dev', run_in_background: true } as never)
+  const ended = $.session.end({ reason: 'prompt_input_exit', sessionId: 's', resume: { id: 's' } } as never)
+  await clock.advance(500)
+  await ended
+  expect(w.kills[0]).toEqual(['kill', '-TERM', '890', '900', '910', '911'])
+})
+
+test('leaves background commands running after /clear', async ($, on) => {
+  mock.clock(on)
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }) as never)
+  const w = world(on, [IDLE, DEV, DEV], { result: { backgroundTaskId: 'b1' }, isClockMocked: true })
+  await $.tool.call({ tool: 'Bash', command: 'pnpm dev', run_in_background: true } as never)
+  await $.session.end({ reason: 'clear', sessionId: 's', resume: { id: 's' } } as never)
+  expect(w.kills).toEqual([])
+})
+
+test('/node-close lists orphaned Node with CPU use, and only the person may end them', async ($, on) => {
+  const w = world(on, [STRANDED], { usage: '  911  1  198.5  15:56:02 x\n  900  1  0.0  15:56:02 y' })
+  const listed = await $.command.run({ command: 'node-close', args: '' } as never)
+  // The person's own launchd-owned server is listed too, for them to judge.
+  expect(listed.text).toMatch(/3 Node processes whose parent is gone/)
+  expect(listed.text).toMatch(/911\s+198.5%\s+15:56:02/)
+  // Raised by a plugin here, not typed by the person: refused.
+  const asked = await $.command.run({ command: 'node-close', args: 'kill all' } as never)
+  expect(asked.text).toMatch(/Only you can end/)
+  expect(w.kills).toEqual([])
+})
+
+test('keeps tracking a background shell that replaced itself with Node', () => {
+  const shell = parsePs(ps([880, 70, BG_SHELL]))
+  const execd = parsePs(ps(APP, CLAUDE, [880, 70, '/usr/local/bin/node /usr/local/bin/pnpm dev'], [900, 880, TSX]))
+  expect(grow(shell, execd).map(p => p.pid)).toEqual([880, 900])
 })

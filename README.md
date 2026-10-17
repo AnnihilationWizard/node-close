@@ -6,11 +6,11 @@
 </p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Version-1.0.0-green.svg" alt="Version 1.0.0"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Version-1.1.0-green.svg" alt="Version 1.1.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"></a>
   <a href="https://code.claude.com/docs"><img src="https://img.shields.io/badge/Platform-Claude%20Code-D97757.svg" alt="Platform: Claude Code"></a>
   <a href="hooks/register.ts"><img src="https://img.shields.io/badge/Type-Function%20hooks%20mod-6E7681.svg" alt="Function hooks mod"></a>
-  <a href="hooks/register.test.ts"><img src="https://img.shields.io/badge/Tests-9%20passing-3FB950.svg" alt="9 tests passing"></a>
+  <a href="hooks/register.test.ts"><img src="https://img.shields.io/badge/Tests-17%20passing-3FB950.svg" alt="17 tests passing"></a>
 </p>
 
 <p align="center">
@@ -34,18 +34,21 @@ When Claude runs tests or builds, the command can finish while Node keeps runnin
 ## Features
 
 - **Ends leftovers at once:** After a Bash or PowerShell command finishes, Node processes it started that are still running are sent `SIGTERM`, then `SIGKILL` after one second if they stay (`taskkill /T` on Windows).
-- **Takes their children too:** A Node's esbuild service or worker processes go with it.
+- **Takes their tools too:** A Node's workers, and tools a Node project installed under `node_modules` such as esbuild, swc or turbo, go with it, even when the Node that started them has already exited.
 - **Only what the command left:** A process counts only when it is new since the command started **and** has lost its parent, re-parented to launchd/init or, on Windows, pointing at a parent that no longer exists.
-- **Keeps what you meant to keep:** Node running before the command, your own servers, other sessions, background commands and processes still owned by a running parent are never touched.
+- **Keeps what you meant to keep:** Node running before the command, your own servers, other sessions and processes still owned by a running parent are never touched.
+- **Follows background commands:** A background command's processes are tracked. Once it stops, any Node it left is ended within 30 seconds; when the session ends, its Node trees are ended. Claude Code usually cleans these up itself; this is a fallback for when it does not.
 - **Respects on-purpose background work:** Commands with `&`, `nohup`, `disown`, `setsid`, `pm2`, `forever`, `--daemon`, `--detach` or `Start-Process` keep their processes; Claude is told the PIDs instead.
 - **Tells Claude and you:** Claude gets the PIDs that were ended, and a toast shows the count.
+- **Finds orphans from anywhere:** `/node-close` lists every Node whose parent is gone, with CPU use and run time, whoever started it; `/node-close kill` ends the ones you name.
 
 | Situation | What node-close does |
 | --- | --- |
 | `npx vitest run` finishes, its runner and workers keep running | Ends them, tells Claude which PIDs |
 | A process ignores `SIGTERM` | Kills it after one second; reports any that still remain |
 | `nohup node server.js &` | Keeps it, tells Claude how to end it later |
-| `npm run dev` with `run_in_background`, or moved to the background | Leaves it alone |
+| `npm run dev` with `run_in_background`, or moved to the background | Leaves it running; ends what it leaves once it stops, or at session end |
+| An esbuild spinning after its `tsx watch` and session are gone | `/node-close` lists it with its CPU use; `/node-close kill <PID>` ends it |
 | `git status`, `ls` and other commands that cannot start Node | Not checked |
 
 ## Install
@@ -84,9 +87,19 @@ To load a clone in every session, add it to the `env` block of `~/.claude/settin
 
 Once installed, there is nothing to configure. Ask Claude to run your tests; when the command finishes, any Node it left running is closed.
 
+| Command | Effect |
+| --- | --- |
+| `/node-close` | List every orphaned Node and Node-project tool on the machine, with PID, CPU use, run time and command |
+| `/node-close kill <PID ...>` | End the listed processes you name, with what runs beneath them |
+| `/node-close kill all` | End every listed process |
+
+`/node-close` lists processes Claude did not start too, such as a server you run under launchd, so check the list before `kill all`. Only you can run `kill`: when Claude or another plugin runs the command, it is refused.
+
 ### Limitations
 
 - Only commands Claude runs through Bash or PowerShell are checked, not commands you run yourself.
+- Nothing runs when Claude Code is killed outright (`SIGKILL`, a crash, the app force-quit), so its background commands can still be left behind. Use `/node-close` in the next session to find them.
+- Background commands are checked every 30 seconds while any are tracked; on Windows each check takes about a second of PowerShell.
 - A command is checked only when it may start Node: it names `node`, `npm`, `npx`, `pnpm`, `yarn`, `bun`, a common test or build tool, a `.js`, `.ts` or `.sh` file, or `make`. A Node started by some other wrapper is not cleaned up.
 - A Node that keeps its parent alive, for example under a daemon that stays running, is not counted as a leftover.
 - An `&` inside quotes, such as in a URL, is read as background work, so that command's leftovers are reported instead of ended.
@@ -113,6 +126,7 @@ Run `claude --plugin-dir .` to try changes. In an interactive session the folder
 ```text
 .claude-plugin/   plugin.json manifest and marketplace.json
 hooks/            hooks.json, the hooks module and its tests
+types/            state contract for tracked background processes
 docs/images/      README illustration
 ```
 

@@ -6,6 +6,8 @@ node-close ends processes on your machine after shell commands Claude runs. Thes
 
 - It hooks `tool.call` for Bash and PowerShell. Before and after a command that may start Node, it lists processes with `ps -axww -o pid=,ppid=,command=`, or PowerShell's `Get-CimInstance Win32_Process` on Windows.
 - It ends only processes that are new since the command started, have lost their parent, and are Node or beneath a Node: `kill -TERM`, then `kill -KILL` for any still there after one second (`taskkill /T`, then `taskkill /T /F` on Windows).
+- For a background command, it lists processes again right after the command starts and keeps their PIDs and command lines in the session's state. Every 30 seconds while any are tracked, and when the session ends (not on `/clear` or a resume), it ends the Node trees among them that are left behind: orphaned ones during the session, all of them at its end.
+- `/node-close` lists every Node, or executable under `node_modules`, whose parent is gone, with CPU use and elapsed time from `ps -axww -o pid=,ppid=,pcpu=,etime=,command=`. It never lists Claude Code itself or its ancestors. `/node-close kill` ends only listed PIDs, and only when you run the command yourself; a run from Claude, a plugin or the SDK is refused.
 - It adds a note for Claude naming the PIDs and command lines it ended or kept, and shows a toast with the count.
 - It does not read or write files, make network requests or change settings.
 
