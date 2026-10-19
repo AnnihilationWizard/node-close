@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.1] - 2026-10-19
+
+- Count Node apart from the helpers beneath it in every note, toast and `/node-close` listing. On Windows, a kept `node.exe` with its `conhost.exe` was reported as "2 Node processes"; it is now "1 Node process and 1 helper process".
+- The plugin and marketplace descriptions mention esbuild and `/node-close`.
+
 ## [1.1.0] - 2026-10-17
 
 - Count tools a Node project installed under `node_modules`, such as esbuild, swc or turbo, as Node: an esbuild left on its own after its Node exited is now ended.
@@ -21,5 +26,6 @@ Initial release of node-close by AnnihilationWizard.
 
 Built on Claude Code's early-access function-hooks mod API.
 
+[1.1.1]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.1
 [1.1.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.0
 [1.0.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.0.0

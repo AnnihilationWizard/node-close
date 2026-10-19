@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SWEEP_MS, grow, isNode, isNodeFamily, leftovers, orphans, parsePs } from './register'
+import { SWEEP_MS, count, grow, isNode, isNodeFamily, leftovers, orphans, parsePs } from './register'
 
 const ps = (...rows: [number, number, string][]) => rows.map(([pid, ppid, c]) => `  ${pid}  ${ppid} ${c}`).join('\n')
 
@@ -204,4 +204,19 @@ test('keeps tracking a background shell that replaced itself with Node', () => {
   const shell = parsePs(ps([880, 70, BG_SHELL]))
   const execd = parsePs(ps(APP, CLAUDE, [880, 70, '/usr/local/bin/node /usr/local/bin/pnpm dev'], [900, 880, TSX]))
   expect(grow(shell, execd).map(p => p.pid)).toEqual([880, 900])
+})
+
+test('counts Node apart from its helpers, such as a Windows console host', () => {
+  const kept = parsePs('37264 6612 "C:\\Program Files\\nodejs\\node.exe" -e setTimeout(()=>{},120001)\r\n31028 37264 \\??\\C:\\Windows\\system32\\conhost.exe 0x4\r\n')
+  expect(count(kept)).toBe('1 Node process and 1 helper process')
+  expect(count(kept.slice(1))).toBe('1 helper process')
+  expect(count([])).toBe('0 Node processes')
+})
+
+test('says how many are Node when it keeps a tree on Windows', async ($, on) => {
+  const before = '4 0 System\r\n60 4 claude.exe\r\n'
+  const after = before + '37264 6612 "C:\\Program Files\\nodejs\\node.exe" -e x\r\n31028 37264 C:\\Windows\\system32\\conhost.exe 0x4\r\n'
+  world(on, [before, after])
+  const r = await $.tool.call({ tool: 'Bash', command: "Start-Process node -ArgumentList '-e','x'" })
+  expect(r.context?.join('\n')).toMatch(/left 1 Node process and 1 helper process running on purpose/)
 })

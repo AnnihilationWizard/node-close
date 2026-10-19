@@ -212,6 +212,17 @@ const close = async ($: EngineInterface, targets: readonly Proc[], graceMs = GRA
 
 const plural = (n: number) => `${n} Node process${n === 1 ? '' : 'es'}`
 
+// How many of `procs` are Node, and how many are helpers beneath one (a
+// Windows console host, a shell): "1 Node process and 1 helper process".
+export const count = (procs: readonly Proc[]) => {
+  const node = procs.filter(p => isNodeFamily(p.command)).length
+  const helpers = procs.length - node
+  return [
+    ...(node > 0 || helpers === 0 ? [plural(node)] : []),
+    ...(helpers > 0 ? [`${helpers} helper process${helpers === 1 ? '' : 'es'}`] : []),
+  ].join(' and ')
+}
+
 const short = (command: string) => (command.length > 80 ? `${command.slice(0, 77)}...` : command)
 
 const describe = (procs: readonly Proc[]) => procs.map(p => `${p.pid} (${short(p.command)})`).join(', ')
@@ -247,12 +258,13 @@ const sweep = async ($: EngineInterface) => {
   await update($, tracked, () => kept.map(({ pid, command }) => ({ pid, command })))
   if (kept.length === 0) stopSweeping()
   if (left.length === 0) return
-  const closed = left.length - stuck.length
-  if (closed > 0) $.ui.toast(`${$.plugin.name}: closed ${plural(closed)} a stopped background command left`)
+  const ended = left.filter(p => !stuck.some(q => q.pid === p.pid))
+  const closed = ended.length
+  if (closed > 0) $.ui.toast(`${$.plugin.name}: closed ${count(ended)} a stopped background command left`)
   notes.push(
     stuck.length === 0
-      ? `${$.plugin.name}: a background command stopped but left ${plural(left.length)} running, now ended: ${describe(left)}.`
-      : `${$.plugin.name}: a background command stopped but left ${plural(left.length)} running; ${closed} ended, ` +
+      ? `${$.plugin.name}: a background command stopped but left ${count(left)} running, now ended: ${describe(left)}.`
+      : `${$.plugin.name}: a background command stopped but left ${count(left)} running; ${count(ended)} ended, ` +
         `${stuck.length} would not exit: ${describe(stuck)}. End them with \`${killHint(stuck)}\`.`,
   )
 }
@@ -315,17 +327,18 @@ const guard: Hook<'tool.call'> = async ($, e, next) => {
 
   if (isKept)
     return withNotes(ran, [
-      `${$.plugin.name}: this command finished and left ${plural(left.length)} running on purpose, so they were kept: ` +
+      `${$.plugin.name}: this command finished and left ${count(left)} running on purpose, so they were kept: ` +
         `${describe(left)}. End them with \`${killHint(left)}\` when they are no longer needed.`,
     ])
 
   const stuck = await close($, left)
-  const closed = left.length - stuck.length
-  if (closed > 0) $.ui.toast(`${$.plugin.name}: closed ${plural(closed)} left by the last command`)
+  const ended = left.filter(p => !stuck.some(q => q.pid === p.pid))
+  const closed = ended.length
+  if (closed > 0) $.ui.toast(`${$.plugin.name}: closed ${count(ended)} left by the last command`)
   return withNotes(ran, [
     stuck.length === 0
-      ? `${$.plugin.name}: this command finished but left ${plural(left.length)} running, now ended: ${describe(left)}.`
-      : `${$.plugin.name}: this command finished but left ${plural(left.length)} running; ${closed} ended, ` +
+      ? `${$.plugin.name}: this command finished but left ${count(left)} running, now ended: ${describe(left)}.`
+      : `${$.plugin.name}: this command finished but left ${count(left)} running; ${count(ended)} ended, ` +
         `${stuck.length} would not exit: ${describe(stuck)}. End them with \`${killHint(stuck)}\`.`,
   ])
 }
@@ -388,7 +401,7 @@ const command: Hook<'command.run'> = async ($, e) => {
     })
     return {
       text: [
-        `${plural(found.length)} whose parent is gone (not necessarily started by Claude):`,
+        `${count(found)} whose parent is gone (not necessarily started by Claude):`,
         `      PID     CPU      ELAPSED  COMMAND`,
         ...rows,
         `End them with \`/${COMMAND} kill <PID ...>\` or \`/${COMMAND} kill all\`.`,
@@ -407,7 +420,7 @@ const command: Hook<'command.run'> = async ($, e) => {
   const stuck = targets.length > 0 ? await close($, targets) : []
   return {
     text: [
-      targets.length > 0 ? `Ended ${plural(targets.length - stuck.length)}.` : `Nothing ended.`,
+      targets.length > 0 ? `Ended ${count(targets.filter(p => !stuck.some(q => q.pid === p.pid)))}.` : `Nothing ended.`,
       ...(stuck.length > 0 ? [`Would not exit: ${describe(stuck)}.`] : []),
       ...(skipped.length > 0 ? [`Skipped, not an orphaned Node process: ${skipped.join(' ')}.`] : []),
     ].join('\n'),
