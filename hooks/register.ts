@@ -80,6 +80,66 @@ const ownChain = (procs: readonly Proc[], byPid: ReadonlyMap<number, Proc>): Set
   return chain
 }
 
+// `ps` with each process's environment, on macOS and Linux. Windows does not
+// show another process's environment.
+export const psEnv = (pids: readonly number[]): string[] => ['ps', 'eww', '-o', 'pid=,command=', '-p', pids.join(',')]
+
+// The CLAUDE_PID each process inherited: Claude Code sets it in every Bash
+// shell it starts, and it stays with the shell's descendants, orphaned too.
+export const parseClaudePids = (stdout: string): Map<number, number> =>
+  new Map(
+    stdout.split(/\r?\n/).flatMap(line => {
+      const m = /^\s*(\d+)\s.*\sCLAUDE_PID=(\d+)(\s|$)/.exec(line)
+      return m ? [[Number(m[1]), Number(m[2])] as const] : []
+    }),
+  )
+
+// Of `candidates`, the ones this Claude Code started: a process whose
+// CLAUDE_PID is the Claude Code that ran this listing (its direct parent,
+// not a Claude Code further up: a `claude -p` started from another session
+// runs beneath that session's), and what runs beneath one. Another
+// session's or agent's Node names its own Claude Code, and one started
+// outside Claude Code names none, so both are left alone. Where
+// environments cannot be read, or no listing is found, every candidate is
+// kept, as before.
+//
+// `unknown` holds the candidates neither marked as ours nor as another's:
+// no CLAUDE_PID at or above them. They are kept and reported, not ended, so
+// if Claude Code ever stops setting CLAUDE_PID the mod says so on every
+// leftover instead of going quiet.
+export const owners = (
+  procs: readonly Proc[],
+  candidates: readonly Proc[],
+  claudePids: ReadonlyMap<number, number> | undefined,
+): { ours: Proc[]; unknown: Proc[] } => {
+  const own = new Set(procs.filter(p => isListing(p.command)).map(p => p.ppid))
+  if (claudePids === undefined || own.size === 0) return { ours: [...candidates], unknown: [] }
+  const byPid = new Map(candidates.map(c => [c.pid, c]))
+  // The nearest CLAUDE_PID at or above `p` among the candidates.
+  const claudeOf = (p: Proc): number | undefined => {
+    for (let q: Proc | undefined = p, seen = new Set<number>(); q !== undefined && !seen.has(q.pid); q = byPid.get(q.ppid)) {
+      seen.add(q.pid)
+      const claude = claudePids.get(q.pid)
+      if (claude !== undefined) return claude
+    }
+    return undefined
+  }
+  const ours: Proc[] = []
+  const unknown: Proc[] = []
+  for (const p of candidates) {
+    const claude = claudeOf(p)
+    if (claude === undefined) unknown.push(p)
+    else if (own.has(claude)) ours.push(p)
+  }
+  return { ours, unknown }
+}
+
+export const mine = (
+  procs: readonly Proc[],
+  candidates: readonly Proc[],
+  claudePids: ReadonlyMap<number, number> | undefined,
+): Proc[] => owners(procs, candidates, claudePids).ours
+
 // Every orphaned Node on the machine, whoever started it: Node or a Node
 // project's tool whose parent is gone, and everything beneath one. Claude
 // Code itself is never one, even where its parent is launchd.
@@ -223,6 +283,29 @@ const usage = async ($: EngineInterface): Promise<Map<number, Usage>> => {
   }
 }
 
+// The CLAUDE_PID of each of `pids`, or undefined where environments cannot
+// be read: on Windows, or when `ps` fails.
+const claudePidsOf = async ($: EngineInterface, pids: readonly number[]): Promise<Map<number, number> | undefined> => {
+  if (lister === CIM || pids.length === 0) return undefined
+  try {
+    const { exitCode, stdout } = await $.process.run(psEnv(pids))
+    // `ps -p` exits 1 when some PIDs are gone; the rest are still listed.
+    return exitCode === 0 || stdout.trim() !== '' ? parseClaudePids(stdout) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Of `candidates`, the ones this Claude Code started (see `mine`).
+const owned = async (
+  $: EngineInterface,
+  procs: readonly Proc[],
+  candidates: readonly Proc[],
+): Promise<{ ours: Proc[]; unknown: Proc[] }> =>
+  candidates.length === 0
+    ? { ours: [], unknown: [] }
+    : owners(procs, candidates, await claudePidsOf($, candidates.map(p => p.pid)))
+
 const end = async ($: EngineInterface, pids: readonly number[], isForced: boolean) => {
   if (pids.length === 0) return
   const argv =
@@ -358,18 +441,30 @@ const guard: Hook<'tool.call'> = async ($, e, next) => {
   const isBackground =
     run_in_background === true ||
     typeof (ran.result as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId === 'string'
+  const after = (await list($)) ?? []
   if (isBackground) {
-    if (!isKept) await track($, ((await list($)) ?? []).filter(p => !isBefore.has(p.pid)))
+    if (!isKept) await track($, (await owned($, after, after.filter(p => !isBefore.has(p.pid)))).ours)
     return withNotes(ran)
   }
 
-  const left = leftovers(isBefore, (await list($)) ?? [])
-  if (left.length === 0) return withNotes(ran)
+  // Only what this Claude Code started: a Node another session started in
+  // the meantime has lost its parent too, but is not this command's.
+  const { ours: left, unknown } = await owned($, after, leftovers(isBefore, after))
+  const unsure =
+    unknown.length === 0
+      ? []
+      : [
+          `${$.plugin.name}: ${count(unknown)} appeared while this command ran and lost ${unknown.length === 1 ? 'its' : 'their'} parent, ` +
+            `but carry no CLAUDE_PID, so it cannot tell whether this command started them; they were kept: ${describe(unknown)}. ` +
+            `If they are this command's, end them with \`${killHint(unknown)}\`.`,
+        ]
+  if (left.length === 0) return withNotes(ran, unsure)
 
   if (isKept)
     return withNotes(ran, [
       `${$.plugin.name}: this command finished and left ${count(left)} running on purpose, so they were kept: ` +
         `${describe(left)}. End them with \`${killHint(left)}\` when they are no longer needed.`,
+      ...unsure,
     ])
 
   const stuck = await close($, left)
@@ -381,6 +476,7 @@ const guard: Hook<'tool.call'> = async ($, e, next) => {
       ? `${$.plugin.name}: this command finished but left ${count(left)} running, now ended: ${describe(left)}.`
       : `${$.plugin.name}: this command finished but left ${count(left)} running; ${count(ended)} ended, ` +
         `${stuck.length} would not exit: ${describe(stuck)}. End them with \`${killHint(stuck)}\`.`,
+    ...unsure,
   ])
 }
 

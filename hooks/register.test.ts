@@ -8,8 +8,10 @@ import {
   isNode,
   isNodeFamily,
   leftovers,
+  mine,
   orphans,
   parseArgs,
+  parseClaudePids,
   parseCimUsage,
   parsePs,
   tree,
@@ -55,7 +57,13 @@ test('on Windows, counts a tree whose parent no longer exists', () => {
 const world = (
   on: On,
   tables: string[],
-  opts: { result?: object; onKill?: (argv: readonly string[]) => void; usage?: string; isClockMocked?: boolean } = {},
+  opts: {
+    result?: object
+    onKill?: (argv: readonly string[]) => void
+    usage?: string
+    env?: string
+    isClockMocked?: boolean
+  } = {},
 ) => {
   const kills: string[][] = []
   const ran: string[] = []
@@ -67,6 +75,9 @@ const world = (
       kills.push([...argv])
       opts.onKill?.(argv)
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (argv[1] === 'eww') {
+      return { value: { exitCode: 0, stdout: opts.env ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (argv.includes('pid=,ppid=,pcpu=,etime=,command=')) {
       return { value: { exitCode: 0, stdout: opts.usage ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -272,4 +283,52 @@ test('/node-close kill with a stray word ends nothing and shows usage', async ($
   expect(r.text).toMatch(/Not a PID: Ended/)
   expect(r.text).toMatch(/Nothing was ended/)
   expect(w.kills).toEqual([])
+})
+
+// Another session's Node appears while a command runs here: both lose their
+// parent, but only this Claude Code's (PID 70) carries CLAUDE_PID=70.
+const LISTING: [number, number, string] = [990, 70, 'ps -axww -o pid=,ppid=,command=']
+const OTHER = '/usr/local/bin/node /Users/me/other/server.js'
+const MIXED = ps(APP, CLAUDE, SERVER, LISTING, [900, 1, '/usr/local/bin/node /Users/me/p/node_modules/.bin/vitest run'], [902, 900, ESBUILD], [950, 1, OTHER])
+const ENV = [
+  `  900 /usr/local/bin/node vitest run TERM=xterm CLAUDE_PID=70 CLAUDECODE=1`,
+  `  902 ${ESBUILD}`, // spawned with a clean environment: goes with its parent
+  `  950 ${OTHER} CLAUDE_PID=555 CLAUDECODE=1`,
+].join('\n')
+
+test('tells this Claude Code\'s processes from another session\'s', () => {
+  const procs = parsePs(MIXED)
+  const claudePids = new Map([[900, 70], [950, 555]])
+  expect(mine(procs, procs.filter(p => [900, 902, 950].includes(p.pid)), claudePids).map(p => p.pid)).toEqual([900, 902])
+  // A Node started outside Claude Code names no Claude Code: left alone.
+  expect(mine(procs, procs.filter(p => p.pid === 950), new Map())).toEqual([])
+  // Environments unreadable (Windows): every candidate is kept, as before.
+  expect(mine(procs, procs.filter(p => p.pid === 950), undefined).map(p => p.pid)).toEqual([950])
+  expect(parseClaudePids(ENV)).toEqual(new Map([[900, 70], [950, 555]]))
+})
+
+test('keeps and reports leftovers that carry no CLAUDE_PID, instead of going quiet', async ($, on) => {
+  // As if Claude Code stopped setting CLAUDE_PID: the environment names none.
+  const tables = [ps(APP, CLAUDE, SERVER, LISTING), MIXED]
+  const w = world(on, tables, { env: `  900 node vitest run TERM=xterm\n  950 ${OTHER} TERM=xterm` })
+  const r = await $.tool.call({ tool: 'Bash', command: 'npx vitest run' })
+  expect(w.kills).toEqual([])
+  expect(r.context?.join('\n')).toMatch(/carry no CLAUDE_PID, so it cannot tell whether this command started them; they were kept: 900 /)
+})
+
+test('does not take the Claude Code above a nested claude -p as its own', () => {
+  // This Claude Code (70) runs beneath another session's (40), which started
+  // a long-running Node of its own (950, CLAUDE_PID=40).
+  const procs = parsePs(ps([40, 1, 'claude'], [70, 40, 'claude -p run the tests'], LISTING, [900, 1, 'node vitest run'], [950, 1, OTHER]))
+  const claudePids = new Map([[900, 70], [950, 40]])
+  expect(mine(procs, procs.filter(p => [900, 950].includes(p.pid)), claudePids).map(p => p.pid)).toEqual([900])
+})
+
+test('leaves another session\'s Node running when a command here finishes', async ($, on) => {
+  const tables = [ps(APP, CLAUDE, SERVER, LISTING), MIXED]
+  const w = world(on, tables, { env: ENV, onKill: () => tables.push(ps(APP, CLAUDE, SERVER, LISTING, [950, 1, OTHER])) })
+  const r = await $.tool.call({ tool: 'Bash', command: 'npx vitest run' })
+  expect(w.kills).toEqual([['kill', '-TERM', '900', '902']])
+  expect(r.context?.join('\n')).toMatch(/now ended: 900 .*902 /)
+  expect(r.context?.join('\n')).not.toMatch(/950/)
 })

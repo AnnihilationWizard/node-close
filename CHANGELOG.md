@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0] - 2026-10-19
+
+- On macOS and Linux, a leftover must carry this Claude Code's `CLAUDE_PID`, which Claude Code sets in every shell it starts and its descendants keep, orphaned too. A Node that another session, an agent or you start while a command runs here is no longer ended; before, any Node that appeared on the machine and lost its parent counted. Background-command tracking follows the same rule.
+- A Claude Code started by another session's command (a nested `claude -p`) takes only its own `CLAUDE_PID` as its own, not the outer session's.
+- A leftover that carries no `CLAUDE_PID` at all is kept and reported to Claude with its PID and how to end it, so the mod does not go quiet if Claude Code stops setting the variable.
+- Windows, which does not show another process's environment, keeps the earlier rule; the README says so.
+
 ## [1.1.2] - 2026-10-19
 
 - `/node-close` shows run time on Windows, from each process's `CreationDate`; CPU use stays `-` there, and the listing and README say so.
@@ -35,6 +42,7 @@ Initial release of node-close by AnnihilationWizard.
 
 Built on Claude Code's early-access function-hooks mod API.
 
+[1.2.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.2.0
 [1.1.2]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.2
 [1.1.1]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.1
 [1.1.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.0
