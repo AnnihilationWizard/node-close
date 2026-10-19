@@ -6,11 +6,11 @@
 </p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Version-1.2.0-green.svg" alt="Version 1.2.0"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Version-1.3.0-green.svg" alt="Version 1.3.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"></a>
   <a href="https://code.claude.com/docs"><img src="https://img.shields.io/badge/Platform-Claude%20Code-D97757.svg" alt="Platform: Claude Code"></a>
   <a href="hooks/register.ts"><img src="https://img.shields.io/badge/Type-Function%20hooks%20mod-6E7681.svg" alt="Function hooks mod"></a>
-  <a href="hooks/register.test.ts"><img src="https://img.shields.io/badge/Tests-28%20passing-3FB950.svg" alt="28 tests passing"></a>
+  <a href="hooks/register.test.ts"><img src="https://img.shields.io/badge/Tests-35%20passing-3FB950.svg" alt="35 tests passing"></a>
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@ Some leftovers outlive any hook: Claude Code killed outright, an IDE task, anoth
 
 - **Ends leftovers at once:** After a Bash or PowerShell command finishes, Node processes it started that are still running are sent `SIGTERM`, then `SIGKILL` after one second if they stay (`taskkill /T` on Windows).
 - **Takes their tools too:** A Node's workers, and tools a Node project installed under `node_modules` such as esbuild, swc or turbo, go with it, even when the Node that started them has already exited.
-- **Only what the command left:** A process counts only when it is new since the command started **and** has lost its parent, re-parented to launchd/init or, on Windows, pointing at a parent that no longer exists. On macOS and Linux it must also carry this Claude Code's `CLAUDE_PID`, which Claude Code sets in every shell it starts, so a Node another session or you start in the meantime is left alone.
+- **Only what the command left:** A process counts only when it is new since the command started **and** has lost its parent, re-parented to launchd/init or, on Windows, pointing at a parent that no longer exists. It must also carry this Claude Code's `CLAUDE_PID`, which Claude Code sets in every shell it starts, so a Node another session or you start in the meantime is left alone. On Windows the mod reads it from each candidate's memory with a small helper PowerShell compiles (64-bit processes only).
 - **Keeps what you meant to keep:** Node running before the command, your own servers, other sessions and processes still owned by a running parent are never touched.
 - **Follows background commands:** A background command's processes are tracked. Once it stops, any Node it left is ended within 30 seconds; when the session ends, its Node trees are ended. Claude Code usually cleans these up itself; this is a fallback for when it does not.
 - **Respects on-purpose background work:** Commands with `&`, `nohup`, `disown`, `setsid`, `pm2`, `forever`, `--daemon`, `--detach` or `Start-Process` keep their processes; Claude is told the PIDs instead.
@@ -100,8 +100,8 @@ Once installed, there is nothing to configure. Ask Claude to run your tests; whe
 ### Limitations
 
 - Only commands Claude runs through Bash or PowerShell are checked, not commands you run yourself.
-- **On Windows, another session's Node can be ended.** Windows does not show another process's environment, so there a leftover is still any Node that appeared on the machine while the command ran and lost its parent. If another Claude session, an agent or you start a long-running Node while a long command runs here, it can be ended when that command finishes, and a background command's processes are ended at the session's end. On macOS and Linux this cannot happen: only processes carrying this Claude Code's `CLAUDE_PID` are ended.
-- **`CLAUDE_PID` is Claude Code's own, undocumented variable.** If a Claude Code release stops setting it, macOS and Linux leftovers are no longer ended: each one is kept and reported to Claude as carrying no `CLAUDE_PID`, so the change shows instead of passing silently. The same note appears for a Node started outside Claude Code, such as from your terminal, while a command runs.
+- **On Windows, a helper reads other processes' memory.** Windows does not list another process's environment, so PowerShell compiles a small C# class (`Add-Type`) that opens each candidate with `PROCESS_VM_READ` and reads `CLAUDE_PID` from its environment block. Antivirus may flag this pattern. If PowerShell refuses the helper, the mod falls back to the older rule, where any Node that appeared while the command ran and lost its parent counts, another session's included, and tells Claude so once. A 32-bit process, or one it cannot open (run as administrator, or by another user), is kept and reported instead of ended.
+- **`CLAUDE_PID` is Claude Code's own, undocumented variable.** If a Claude Code release stops setting it, leftovers are no longer ended: each one is kept and reported to Claude as carrying no `CLAUDE_PID`, so the change shows instead of passing silently. The same note appears for a Node started outside Claude Code, such as from your terminal, while a command runs.
 - Nothing runs when Claude Code is killed outright (`SIGKILL`, a crash, the app force-quit), so its background commands can still be left behind. Use `/node-close` in the next session to find them.
 - On Windows, `/node-close` shows run time but not CPU use, which `Win32_Process` does not give.
 - Background commands are checked every 30 seconds while any are tracked; on Windows each check takes about a second of PowerShell.

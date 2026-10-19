@@ -15,12 +15,40 @@ const MAY_START_NODE =
 const KEEPS_RUNNING =
   /(^|[^&>|])&(?![&>])|\b(nohup|disown|setsid|pm2|forever|daemon(ize)?)\b|start-process|--daemon\b|--detach\b/i
 
-export type Proc = { pid: number; ppid: number; command: string }
+// `started`: when the process started, in seconds since the epoch, where the
+// listing gives it.
+export type Proc = { pid: number; ppid: number; command: string; started?: number }
 
-// Lines of `pid ppid command`, from `ps` or from the PowerShell listing below
-// (whose lines end in CRLF).
-export const parsePs = (stdout: string): Proc[] =>
+// `ps` elapsed time, [[dd-]hh:]mm:ss, in seconds.
+export const elapsedSeconds = (etime: string): number => {
+  const [days, clock] = etime.includes('-') ? etime.split('-') : ['0', etime]
+  const parts = (clock ?? '').split(':').map(Number).reverse()
+  return Number(days) * 86_400 + (parts[2] ?? 0) * 3600 + (parts[1] ?? 0) * 60 + (parts[0] ?? 0)
+}
+
+// A Windows FILETIME (100 ns since 1601) in seconds since the epoch.
+const fromFileTime = (filetime: string) => Math.floor(Number(filetime) / 10_000_000) - 11_644_473_600
+
+// Lines of a process listing, read at `now` (milliseconds since the epoch):
+// `pid ppid etime command` from `ps`, `pid ppid filetime command` from the
+// PowerShell listing below (lines end in CRLF; 0 when Windows gives no
+// CreationDate), or plain `pid ppid command`. `ps`'s elapsed time is used,
+// not its start time, whose format follows the locale.
+export const parsePs = (stdout: string, now = Date.now()): Proc[] =>
   stdout.split(/\r?\n/).flatMap(line => {
+    const timed = /^\s*(\d+)\s+(\d+)\s+((?:\d+-)?(?:\d+:)?\d+:\d+)\s+(.*)$/.exec(line)
+    if (timed)
+      return [{ pid: Number(timed[1]), ppid: Number(timed[2]), command: timed[4] ?? '', started: Math.floor(now / 1000) - elapsedSeconds(timed[3]!) }]
+    const filetime = /^\s*(\d+)\s+(\d+)\s+(\d{1,19})(?:\s+(.*))?$/.exec(line)
+    if (filetime && (filetime[3] === '0' || filetime[3]!.length >= 17))
+      return [
+        {
+          pid: Number(filetime[1]),
+          ppid: Number(filetime[2]),
+          command: filetime[4] ?? '',
+          ...(filetime[3] === '0' ? {} : { started: fromFileTime(filetime[3]!) }),
+        },
+      ]
     const m = /^\s*(\d+)\s+(\d+)\s*(.*)$/.exec(line)
     return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), command: m[3] ?? '' }] : []
   })
@@ -80,9 +108,85 @@ const ownChain = (procs: readonly Proc[], byPid: ReadonlyMap<number, Proc>): Set
   return chain
 }
 
-// `ps` with each process's environment, on macOS and Linux. Windows does not
-// show another process's environment.
+// Whether the executable is Claude Code: `claude`, or `claude.exe` on Windows.
+const isClaude = (command: string) => /(^|[\\/"'])claude(\.exe)?["']?(\s|$)/i.test(executable(command))
+
+// The Claude Code running this listing: the nearest `claude` above it (on
+// Windows a `cmd.exe` can sit between), else its direct parent. Never a
+// Claude Code further up, which a nested `claude -p` runs beneath.
+export const ownClaude = (procs: readonly Proc[]): Set<number> => {
+  const byPid = new Map(procs.map(p => [p.pid, p]))
+  const own = new Set<number>()
+  for (const listing of procs.filter(p => isListing(p.command))) {
+    let found: number | undefined
+    for (let up = byPid.get(listing.ppid), seen = new Set<number>(); up !== undefined && !seen.has(up.pid); up = byPid.get(up.ppid)) {
+      seen.add(up.pid)
+      if (isClaude(up.command)) {
+        found = up.pid
+        break
+      }
+    }
+    own.add(found ?? listing.ppid)
+  }
+  return own
+}
+
+// `ps` with each process's environment, on macOS and Linux.
 export const psEnv = (pids: readonly number[]): string[] => ['ps', 'eww', '-o', 'pid=,command=', '-p', pids.join(',')]
+
+// Windows does not list another process's environment, so a small C# class,
+// compiled by PowerShell's Add-Type, reads CLAUDE_PID from each process's
+// environment block (the PEB's process parameters). 64-bit processes only:
+// a 32-bit (WOW64) one, or one it cannot open, is left out and so counts as
+// carrying none. One line, with no single quote, so it passes inside a
+// PowerShell single-quoted string as the listing's own command does.
+export const WIN_ENV_CLASS =
+  'using System; using System.Runtime.InteropServices; using System.Text; public static class NodeCloseEnv { ' +
+  '[DllImport("kernel32.dll")] static extern IntPtr OpenProcess(int access, bool inherit, int pid); ' +
+  '[DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h); ' +
+  '[DllImport("kernel32.dll")] static extern bool IsWow64Process(IntPtr h, out bool wow64); ' +
+  '[DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h, IntPtr address, byte[] buffer, IntPtr size, out IntPtr read); ' +
+  '[DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int infoClass, byte[] info, int length, out int returned); ' +
+  'static byte[] Read(IntPtr h, long address, int size) { byte[] buffer = new byte[size]; IntPtr read; ' +
+  'return ReadProcessMemory(h, new IntPtr(address), buffer, new IntPtr(size), out read) && read.ToInt64() == size ? buffer : null; } ' +
+  'public static string Get(int pid, string name) { if (IntPtr.Size != 8) return null; ' +
+  'IntPtr h = OpenProcess(0x1000 | 0x0010, false, pid); if (h == IntPtr.Zero) return null; ' +
+  'try { bool wow64; if (!IsWow64Process(h, out wow64) || wow64) return null; ' +
+  'byte[] basic = new byte[48]; int returned; if (NtQueryInformationProcess(h, 0, basic, basic.Length, out returned) != 0) return null; ' +
+  'byte[] parameters = Read(h, BitConverter.ToInt64(basic, 8) + 0x20, 8); if (parameters == null) return null; ' +
+  'long block = BitConverter.ToInt64(parameters, 0); ' +
+  'byte[] environment = Read(h, block + 0x80, 8); byte[] size = Read(h, block + 0x3F0, 8); ' +
+  'if (environment == null || size == null) return null; ' +
+  'long length = BitConverter.ToInt64(size, 0); if (length <= 0 || length > 1048576) return null; ' +
+  'byte[] variables = Read(h, BitConverter.ToInt64(environment, 0), (int)length); if (variables == null) return null; ' +
+  'foreach (string entry in Encoding.Unicode.GetString(variables).Split((char)0)) ' +
+  'if (entry.StartsWith(name + "=", StringComparison.OrdinalIgnoreCase)) return entry.Substring(name.Length + 1); ' +
+  'return ""; } finally { CloseHandle(h); } } }'
+
+// The PowerShell that prints `pid value` for each process whose environment
+// it read (an empty value when CLAUDE_PID is absent).
+export const winEnv = (pids: readonly number[]): string[] => [
+  'powershell.exe',
+  '-NoProfile',
+  '-NonInteractive',
+  '-Command',
+  `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition '${WIN_ENV_CLASS}'; ` +
+    `foreach ($p in @(${pids.join(',')})) { $v = [NodeCloseEnv]::Get($p, 'CLAUDE_PID'); if ($null -ne $v) { "$p $v" } }`,
+]
+
+// Lines of `pid value` from winEnv; a line with no value names no CLAUDE_PID.
+export const parseWinClaudePids = (stdout: string): Map<number, number> =>
+  new Map(
+    stdout.split(/\r?\n/).flatMap(line => {
+      const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
+      return m ? [[Number(m[1]), Number(m[2])] as const] : []
+    }),
+  )
+
+// Whether PowerShell refused to read environments the last time (Add-Type
+// blocked, say by antivirus): leftovers then fall back to the older rule.
+let isWindowsEnvRefused = false
+let hasToldRefusal = false
 
 // The CLAUDE_PID each process inherited: Claude Code sets it in every Bash
 // shell it starts, and it stays with the shell's descendants, orphaned too.
@@ -112,7 +216,7 @@ export const owners = (
   candidates: readonly Proc[],
   claudePids: ReadonlyMap<number, number> | undefined,
 ): { ours: Proc[]; unknown: Proc[] } => {
-  const own = new Set(procs.filter(p => isListing(p.command)).map(p => p.ppid))
+  const own = ownClaude(procs)
   if (claudePids === undefined || own.size === 0) return { ours: [...candidates], unknown: [] }
   const byPid = new Map(candidates.map(c => [c.pid, c]))
   // The nearest CLAUDE_PID at or above `p` among the candidates.
@@ -175,13 +279,28 @@ export const tree = (procs: readonly Proc[]): { proc: Proc; depth: number }[] =>
   return out
 }
 
-const isSame = (a: Tracked, b: Tracked) => a.pid === b.pid && a.command === b.command
+// How far apart two listings may place one start time: each derives it from
+// its own clock reading and whole seconds.
+export const START_SLACK_S = 2
+
+// Whether `a` and `b` started at the same moment, as far as both are known.
+const sameStart = (a: Tracked, b: Tracked) =>
+  a.started === undefined || b.started === undefined || Math.abs(a.started - b.started) <= START_SLACK_S
+
+// The same process: same PID and start, or, where a start is unknown, same
+// command line.
+const isSame = (a: Tracked, b: Tracked) =>
+  a.pid === b.pid && (a.started !== undefined && b.started !== undefined ? sameStart(a, b) : a.command === b.command)
+
+// A process as tracked: PID, command line and start.
+const toTracked = ({ pid, command, started }: Proc): Tracked => (started === undefined ? { pid, command } : { pid, command, started })
 
 // The tracked processes still running, with every process now beneath one.
-// Matched by PID alone: a shell that runs one command often replaces itself
-// with it (`zsh -c 'node x.js'` becomes `node x.js` under the same PID).
+// Matched by PID and start, not command line: a shell that runs one command
+// often replaces itself with it (`zsh -c 'node x.js'` becomes `node x.js`
+// under the same PID and start), while a reused PID starts later.
 export const grow = (tracked: readonly Tracked[], procs: readonly Proc[]): Proc[] => {
-  const found = new Map(procs.filter(p => tracked.some(t => t.pid === p.pid)).map(p => [p.pid, p]))
+  const found = new Map(procs.filter(p => tracked.some(t => t.pid === p.pid && sameStart(t, p))).map(p => [p.pid, p]))
   let grew = true
   while (grew) {
     grew = false
@@ -196,13 +315,13 @@ export const grow = (tracked: readonly Tracked[], procs: readonly Proc[]): Proc[
 
 // How processes are listed: `ps` on macOS and Linux; on Windows, where `ps`
 // is missing or is Git Bash's (no -x), PowerShell's Win32_Process.
-export const PS: readonly string[] = ['ps', '-axww', '-o', 'pid=,ppid=,command=']
+export const PS: readonly string[] = ['ps', '-axww', '-o', 'pid=,ppid=,etime=,command=']
 export const CIM: readonly string[] = [
   'powershell.exe',
   '-NoProfile',
   '-NonInteractive',
   '-Command',
-  'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)" }',
+  'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }) $($_.CommandLine)" }',
 ]
 // `ps` with CPU use and elapsed time, for the `/node-close` listing.
 export const PS_USAGE: readonly string[] = ['ps', '-axww', '-o', 'pid=,ppid=,pcpu=,etime=,command=']
@@ -286,7 +405,17 @@ const usage = async ($: EngineInterface): Promise<Map<number, Usage>> => {
 // The CLAUDE_PID of each of `pids`, or undefined where environments cannot
 // be read: on Windows, or when `ps` fails.
 const claudePidsOf = async ($: EngineInterface, pids: readonly number[]): Promise<Map<number, number> | undefined> => {
-  if (lister === CIM || pids.length === 0) return undefined
+  if (pids.length === 0) return undefined
+  if (lister === CIM) {
+    try {
+      const { exitCode, stdout } = await $.process.run(winEnv(pids))
+      isWindowsEnvRefused = exitCode !== 0
+      return exitCode === 0 ? parseWinClaudePids(stdout) : undefined
+    } catch {
+      isWindowsEnvRefused = true
+      return undefined
+    }
+  }
   try {
     const { exitCode, stdout } = await $.process.run(psEnv(pids))
     // `ps -p` exits 1 when some PIDs are gone; the rest are still listed.
@@ -379,7 +508,7 @@ const sweep = async ($: EngineInterface) => {
   const left = strays(procs, isAlive)
   const stuck = left.length > 0 ? await close($, left) : []
   const kept = alive.filter(p => !left.some(l => l.pid === p.pid) || stuck.some(s => s.pid === p.pid))
-  await update($, tracked, () => kept.map(({ pid, command }) => ({ pid, command })))
+  await update($, tracked, () => kept.map(toTracked))
   if (kept.length === 0) stopSweeping()
   if (left.length === 0) return
   const ended = left.filter(p => !stuck.some(q => q.pid === p.pid))
@@ -408,7 +537,7 @@ const track = async ($: EngineInterface, procs: readonly Proc[]) => {
   if (procs.length === 0) return
   await update($, tracked, known => [
     ...known,
-    ...procs.filter(p => !known.some(k => k.pid === p.pid)).map(({ pid, command }) => ({ pid, command })),
+    ...procs.filter(p => !known.some(k => k.pid === p.pid && sameStart(k, p))).map(toTracked),
   ])
   startSweeping($)
 }
@@ -450,10 +579,20 @@ const guard: Hook<'tool.call'> = async ($, e, next) => {
   // Only what this Claude Code started: a Node another session started in
   // the meantime has lost its parent too, but is not this command's.
   const { ours: left, unknown } = await owned($, after, leftovers(isBefore, after))
+  const refused =
+    isWindowsEnvRefused && !hasToldRefusal
+      ? [
+          `${$.plugin.name}: PowerShell refused the helper that reads which Claude Code started a process ` +
+            `(Add-Type was blocked, possibly by antivirus), so on Windows any Node that appears during a command ` +
+            `and loses its parent counts as its leftover, another session's included.`,
+        ]
+      : []
+  if (refused.length > 0) hasToldRefusal = true
   const unsure =
     unknown.length === 0
-      ? []
+      ? refused
       : [
+          ...refused,
           `${$.plugin.name}: ${count(unknown)} appeared while this command ran and lost ${unknown.length === 1 ? 'its' : 'their'} parent, ` +
             `but carry no CLAUDE_PID, so it cannot tell whether this command started them; they were kept: ${describe(unknown)}. ` +
             `If they are this command's, end them with \`${killHint(unknown)}\`.`,

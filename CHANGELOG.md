@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0] - 2026-10-19
+
+- On Windows, a leftover must also carry this Claude Code's `CLAUDE_PID`, as on macOS and Linux, so a Node another session or you start while a command runs here is no longer ended. PowerShell compiles a small C# class with `Add-Type` that reads `CLAUDE_PID` from each candidate's environment block; 64-bit processes only.
+- A Windows process the helper cannot open (32-bit, run as administrator, or another user's) is kept and reported to Claude instead of ended.
+- If PowerShell refuses the helper, for example because antivirus blocks `Add-Type`, Windows falls back to the earlier rule and Claude is told once.
+- Claude Code's own process is now the nearest `claude` or `claude.exe` above the listing, so a `cmd.exe` in between on Windows does not hide it, and an outer Claude Code is still never taken as its own.
+- Fix: tracked background processes are matched by PID and start time. Since 1.1.0 they were matched by PID alone, so once a tracked process had exited and the system gave its PID to a new process, the 30-second check could end that new process if it was an orphaned Node, another session's included. A shell that replaces itself with Node keeps its PID and start, so it is still followed. Start times come from `ps` elapsed time (not its start column, whose format follows the locale) and from Windows `CreationDate`.
+
 ## [1.2.0] - 2026-10-19
 
 - On macOS and Linux, a leftover must carry this Claude Code's `CLAUDE_PID`, which Claude Code sets in every shell it starts and its descendants keep, orphaned too. A Node that another session, an agent or you start while a command runs here is no longer ended; before, any Node that appeared on the machine and lost its parent counted. Background-command tracking follows the same rule.
@@ -42,6 +50,7 @@ Initial release of node-close by AnnihilationWizard.
 
 Built on Claude Code's early-access function-hooks mod API.
 
+[1.3.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.3.0
 [1.2.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.2.0
 [1.1.2]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.2
 [1.1.1]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.1

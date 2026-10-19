@@ -3,6 +3,7 @@ import type { On } from 'claude-code'
 import {
   SWEEP_MS,
   count,
+  elapsedSeconds,
   formatElapsed,
   grow,
   isNode,
@@ -10,8 +11,12 @@ import {
   leftovers,
   mine,
   orphans,
+  ownClaude,
   parseArgs,
   parseClaudePids,
+  parseWinClaudePids,
+  WIN_ENV_CLASS,
+  winEnv,
   parseCimUsage,
   parsePs,
   tree,
@@ -62,6 +67,10 @@ const world = (
     onKill?: (argv: readonly string[]) => void
     usage?: string
     env?: string
+    // Windows: `ps` is missing, PowerShell lists processes and reads environments.
+    isWindows?: boolean
+    winEnv?: string
+    winEnvExit?: number
     isClockMocked?: boolean
   } = {},
 ) => {
@@ -71,7 +80,10 @@ const world = (
   let i = 0
   on('process.run', ($, e) => {
     const argv = (e as { argv: readonly string[] }).argv
-    if (argv[0] === 'kill') {
+    const done = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (opts.isWindows === true && argv[0] === 'ps') return done('', 1)
+    if (argv[0] === 'powershell.exe' && argv.some(a => a.includes('NodeCloseEnv'))) return done(opts.winEnv ?? '', opts.winEnvExit ?? 0)
+    if (argv[0] === 'kill' || argv[0] === 'taskkill') {
       kills.push([...argv])
       opts.onKill?.(argv)
       return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -224,6 +236,28 @@ test('/node-close lists orphaned Node with CPU use, and only the person may end 
   expect(w.kills).toEqual([])
 })
 
+test('reads start times from ps elapsed time and Windows CreationDate', () => {
+  expect(elapsedSeconds('05')).toBe(5)
+  expect(elapsedSeconds('01:05')).toBe(65)
+  expect(elapsedSeconds('02:01:05')).toBe(7265)
+  expect(elapsedSeconds('3-02:01:05')).toBe(266_465)
+  const now = Date.UTC(2026, 9, 19, 12, 0, 0)
+  const [p] = parsePs('  900  880    01:05 /usr/local/bin/node x.js', now)
+  expect(p).toEqual({ pid: 900, ppid: 880, command: '/usr/local/bin/node x.js', started: now / 1000 - 65 })
+  // 2026-10-19T12:00:00Z as a FILETIME, and a process Windows gives no CreationDate.
+  const [w, s] = parsePs('47284 7000 134368848000000000 "C:\\Program Files\\nodejs\\node.exe" x.js\r\n4 0 0 System\r\n')
+  expect(w).toEqual({ pid: 47284, ppid: 7000, command: '"C:\\Program Files\\nodejs\\node.exe" x.js', started: now / 1000 })
+  expect(s).toEqual({ pid: 4, ppid: 0, command: 'System' })
+})
+
+test('does not take a reused PID for a tracked process', () => {
+  const tracked = [{ pid: 880, command: BG_SHELL, started: 1000 }]
+  // The shell replaced itself with Node: same PID and start, other command line.
+  expect(grow(tracked, [{ pid: 880, ppid: 70, command: 'node x.js', started: 1001 }]).map(p => p.pid)).toEqual([880])
+  // Another session's Node got the same PID later.
+  expect(grow(tracked, [{ pid: 880, ppid: 1, command: OTHER, started: 1600 }])).toEqual([])
+})
+
 test('keeps tracking a background shell that replaced itself with Node', () => {
   const shell = parsePs(ps([880, 70, BG_SHELL]))
   const execd = parsePs(ps(APP, CLAUDE, [880, 70, '/usr/local/bin/node /usr/local/bin/pnpm dev'], [900, 880, TSX]))
@@ -331,4 +365,60 @@ test('leaves another session\'s Node running when a command here finishes', asyn
   expect(w.kills).toEqual([['kill', '-TERM', '900', '902']])
   expect(r.context?.join('\n')).toMatch(/now ended: 900 .*902 /)
   expect(r.context?.join('\n')).not.toMatch(/950/)
+})
+
+test('finds its own Claude Code past a cmd.exe, and not the outer one', () => {
+  // As reported on Windows: pwsh 42308 <- cmd 44432 <- claude.exe 33408 <- claude.exe 6600.
+  const procs = parsePs(
+    [
+      '6600 1 "C:\\Program Files\\Claude\\claude.exe"',
+      '33408 6600 C:\\Users\\me\\.local\\bin\\claude.exe',
+      '44432 33408 C:\\Windows\\system32\\cmd.exe /c powershell.exe ...',
+      '50000 44432 powershell.exe -NoProfile -NonInteractive -Command Get-CimInstance Win32_Process | ForEach-Object { x }',
+    ].join('\r\n'),
+  )
+  expect([...ownClaude(procs)]).toEqual([33408])
+})
+
+test('builds a Windows environment reader that fits in a single-quoted PowerShell string', () => {
+  expect(WIN_ENV_CLASS).not.toContain("'")
+  expect(WIN_ENV_CLASS).not.toContain('\n')
+  const script = winEnv([18052, 49156])[4]!
+  expect(script).toContain("Add-Type -TypeDefinition 'using System;")
+  expect(script).toContain('foreach ($p in @(18052,49156))')
+  expect(parseWinClaudePids('18052 33408\r\n49156 \r\n')).toEqual(new Map([[18052, 33408]]))
+})
+
+// On Windows: CIM listings, with the listing beneath this Claude Code (60).
+const WIN_LISTING = '995 60 powershell.exe -NoProfile -NonInteractive -Command Get-CimInstance Win32_Process | ForEach-Object { x }'
+const WIN_IDLE = ['4 0 System', '60 4 C:\\Users\\me\\.local\\bin\\claude.exe', WIN_LISTING].join('\r\n')
+const WIN_LEFT = [
+  WIN_IDLE,
+  '47284 7000 "C:\\Program Files\\nodejs\\node.exe" -e setTimeout(()=>{},120001)',
+  '48000 7100 "C:\\Program Files\\nodejs\\node.exe" C:\\other\\server.js',
+].join('\r\n')
+
+test('on Windows, ends its own leftover and leaves another session\'s', async ($, on) => {
+  const tables = [WIN_IDLE, WIN_LEFT]
+  const w = world(on, tables, { isWindows: true, winEnv: '47284 60\r\n48000 555\r\n', onKill: () => tables.push(WIN_IDLE) })
+  const r = await $.tool.call({ tool: 'Bash', command: 'node spawn-worker.js' })
+  expect(w.kills[0]).toEqual(['taskkill', '/T', '/PID', '47284'])
+  expect(r.context?.join('\n')).not.toMatch(/48000/)
+})
+
+test('on Windows, keeps and reports a leftover whose environment it cannot open', async ($, on) => {
+  // 48000 runs as administrator: OpenProcess fails, so the reader prints nothing for it.
+  const tables = [WIN_IDLE, WIN_LEFT]
+  const w = world(on, tables, { isWindows: true, winEnv: '47284 60\r\n', onKill: () => tables.push(WIN_IDLE) })
+  const r = await $.tool.call({ tool: 'Bash', command: 'node spawn-worker.js' })
+  expect(w.kills[0]).toEqual(['taskkill', '/T', '/PID', '47284'])
+  expect(r.context?.join('\n')).toMatch(/carry no CLAUDE_PID.*they were kept: 48000 /)
+})
+
+test('on Windows, falls back to the older rule and says so when PowerShell refuses the reader', async ($, on) => {
+  const tables = [WIN_IDLE, WIN_LEFT]
+  const w = world(on, tables, { isWindows: true, winEnvExit: 1, onKill: () => tables.push(WIN_IDLE) })
+  const r = await $.tool.call({ tool: 'Bash', command: 'node spawn-worker.js' })
+  expect(w.kills[0]).toEqual(['taskkill', '/T', '/PID', '47284', '/PID', '48000'])
+  expect(r.context?.join('\n')).toMatch(/PowerShell refused the helper/)
 })
