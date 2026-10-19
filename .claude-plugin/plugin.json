@@ -1,6 +1,6 @@
 {
   "name": "node-close",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "End the Node processes a finished command left running, such as test runners and esbuild; /node-close finds orphaned ones",
   "author": {
     "name": "AnnihilationWizard",

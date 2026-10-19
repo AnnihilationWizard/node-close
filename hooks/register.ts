@@ -103,6 +103,18 @@ export const orphans = (procs: readonly Proc[]): Proc[] => {
   return [...found.values()]
 }
 
+// The listing's order: each orphan, then what runs beneath it, with how deep.
+export const tree = (procs: readonly Proc[]): { proc: Proc; depth: number }[] => {
+  const pids = new Set(procs.map(p => p.pid))
+  const out: { proc: Proc; depth: number }[] = []
+  const visit = (p: Proc, depth: number) => {
+    out.push({ proc: p, depth })
+    for (const child of procs) if (child.ppid === p.pid && child.pid !== p.pid) visit(child, depth + 1)
+  }
+  for (const root of procs.filter(p => !pids.has(p.ppid))) visit(root, 0)
+  return out
+}
+
 const isSame = (a: Tracked, b: Tracked) => a.pid === b.pid && a.command === b.command
 
 // The tracked processes still running, with every process now beneath one.
@@ -134,6 +146,15 @@ export const CIM: readonly string[] = [
 ]
 // `ps` with CPU use and elapsed time, for the `/node-close` listing.
 export const PS_USAGE: readonly string[] = ['ps', '-axww', '-o', 'pid=,ppid=,pcpu=,etime=,command=']
+// On Windows, seconds since each process started, from its CreationDate
+// (absent for some system processes). Win32_Process has no CPU percentage.
+export const CIM_USAGE: readonly string[] = [
+  'powershell.exe',
+  '-NoProfile',
+  '-NonInteractive',
+  '-Command',
+  'Get-CimInstance Win32_Process | Where-Object CreationDate | ForEach-Object { "$($_.ProcessId) $([long]((Get-Date) - $_.CreationDate).TotalSeconds)" }',
+]
 
 // The listing that worked last, tried first next time.
 let lister: readonly string[] | undefined
@@ -171,12 +192,32 @@ export const parseUsage = (stdout: string): Map<number, Usage> =>
     }),
   )
 
-// CPU use and elapsed time by PID, where `ps` gives them (not on Windows).
+// Seconds as `ps` writes elapsed time: [[dd-]hh:]mm:ss.
+export const formatElapsed = (seconds: number) => {
+  const two = (n: number) => String(n).padStart(2, '0')
+  const days = Math.floor(seconds / 86_400)
+  const hours = Math.floor((seconds % 86_400) / 3600)
+  const clock = `${two(Math.floor((seconds % 3600) / 60))}:${two(seconds % 60)}`
+  return days > 0 ? `${days}-${two(hours)}:${clock}` : hours > 0 ? `${two(hours)}:${clock}` : clock
+}
+
+// Lines of `pid seconds` from CIM_USAGE: elapsed time, no CPU use.
+export const parseCimUsage = (stdout: string): Map<number, Usage> =>
+  new Map(
+    stdout.split(/\r?\n/).flatMap(line => {
+      const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
+      return m ? [[Number(m[1]), { cpu: '-', elapsed: formatElapsed(Number(m[2])) }] as const] : []
+    }),
+  )
+
+// CPU use and elapsed time by PID: both from `ps`, elapsed time alone on
+// Windows.
 const usage = async ($: EngineInterface): Promise<Map<number, Usage>> => {
-  if (lister === CIM) return new Map()
+  const isWindows = lister === CIM
   try {
-    const { exitCode, stdout } = await $.process.run(PS_USAGE)
-    return exitCode === 0 ? parseUsage(stdout) : new Map()
+    const { exitCode, stdout } = await $.process.run(isWindows ? CIM_USAGE : PS_USAGE)
+    if (exitCode !== 0) return new Map()
+    return isWindows ? parseCimUsage(stdout) : parseUsage(stdout)
   } catch {
     return new Map()
   }
@@ -387,23 +428,51 @@ const scan = async ($: EngineInterface): Promise<Proc[] | undefined> => {
 
 // `/node-close` lists every orphaned Node on the machine; `/node-close kill
 // <PID ...>` or `kill all` ends listed ones, when the person runs it.
+// What `/node-close` was asked: list, kill some PIDs, kill all, or nothing
+// it understands. Anything after `kill` that is not a PID makes the whole
+// request unclear, so nothing is ended.
+export const parseArgs = (args: string): { list: true } | { kill: 'all' | number[] } | { usage: string } => {
+  const words = args.trim().split(/\s+/).filter(Boolean)
+  if (words.length === 0) return { list: true }
+  if (words[0]?.toLowerCase() !== 'kill') return { usage: `Unknown argument: ${words[0]}` }
+  const rest = words.slice(1)
+  if (rest.length === 1 && rest[0]?.toLowerCase() === 'all') return { kill: 'all' }
+  if (rest.length === 0) return { usage: 'Name the PIDs to end, or all.' }
+  const bad = rest.filter(w => !/^\d+$/.test(w))
+  if (bad.length > 0) return { usage: `Not a PID: ${bad.slice(0, 3).join(' ')}${bad.length > 3 ? ' ...' : ''}` }
+  return { kill: rest.map(Number) }
+}
+
+const USAGE = `Usage: /${COMMAND} | /${COMMAND} kill <PID ...> | /${COMMAND} kill all`
+
 const command: Hook<'command.run'> = async ($, e) => {
-  const words = e.args.trim().split(/\s+/).filter(Boolean)
+  const asked = parseArgs(e.args ?? '')
+  if ('usage' in asked) return { text: `${asked.usage}\n${USAGE}\nNothing was ended.` }
   const found = await scan($)
   if (found === undefined) return { text: `Cannot list processes.` }
 
-  if (words[0]?.toLowerCase() !== 'kill') {
+  if ('list' in asked) {
     if (found.length === 0) return { text: `No orphaned Node processes are running.` }
     const use = await usage($)
-    const rows = found.map(p => {
+    const ordered = tree(found)
+    const roots = ordered.filter(r => r.depth === 0).map(r => r.proc)
+    const beneath = found.length - roots.length
+    const rows = ordered.map(({ proc: p, depth }) => {
       const u = use.get(p.pid)
-      return `  ${String(p.pid).padStart(7)}  ${(u?.cpu ?? '-').padStart(6)}  ${(u?.elapsed ?? '-').padStart(11)}  ${short(p.command)}`
+      const indent = depth > 0 ? `${'  '.repeat(depth - 1)}└─ ` : ''
+      return `${String(p.pid).padStart(7)}  ${(u?.cpu ?? '-').padStart(6)}  ${(u?.elapsed ?? '-').padStart(11)}  ${indent}${short(p.command)}`
     })
     return {
       text: [
-        `${count(found)} whose parent is gone (not necessarily started by Claude):`,
-        `      PID     CPU      ELAPSED  COMMAND`,
+        `${count(roots)} whose parent is gone` +
+          (beneath > 0 ? `, with ${beneath} process${beneath === 1 ? '' : 'es'} beneath ${roots.length === 1 ? 'it' : 'them'}` : '') +
+          ` (not necessarily started by Claude):`,
+        // A code block keeps the columns and the backslashes of Windows paths.
+        '```',
+        `    PID     CPU      ELAPSED  COMMAND`,
         ...rows,
+        '```',
+        ...(lister === CIM ? ['CPU use is not available on Windows.'] : []),
         `End them with \`/${COMMAND} kill <PID ...>\` or \`/${COMMAND} kill all\`.`,
       ].join('\n'),
     }
@@ -412,11 +481,20 @@ const command: Hook<'command.run'> = async ($, e) => {
   if (!PERSON.has(e.origin?.kind ?? ""))
     return { text: `Only you can end these processes; run \`/${COMMAND} kill\` yourself.` }
 
-  const all = words[1]?.toLowerCase() === 'all'
-  const asked = all ? found.map(p => p.pid) : words.slice(1).map(Number).filter(Number.isInteger)
-  if (asked.length === 0) return { text: `Usage: /${COMMAND} kill <PID ...> | all` }
-  const targets = found.filter(p => asked.includes(p.pid))
-  const skipped = asked.filter(pid => !targets.some(p => p.pid === pid))
+  const pids = asked.kill === 'all' ? found.map(p => p.pid) : asked.kill
+  // A named PID takes what runs beneath it, as `taskkill /T` does on Windows.
+  const named = new Set(pids.filter(pid => found.some(p => p.pid === pid)))
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const p of found)
+      if (!named.has(p.pid) && named.has(p.ppid)) {
+        named.add(p.pid)
+        grew = true
+      }
+  }
+  const targets = found.filter(p => named.has(p.pid))
+  const skipped = pids.filter(pid => !found.some(p => p.pid === pid))
   const stuck = targets.length > 0 ? await close($, targets) : []
   return {
     text: [

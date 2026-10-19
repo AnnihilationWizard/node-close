@@ -6,11 +6,11 @@
 </p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Version-1.1.1-green.svg" alt="Version 1.1.1"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/Version-1.1.2-green.svg" alt="Version 1.1.2"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"></a>
   <a href="https://code.claude.com/docs"><img src="https://img.shields.io/badge/Platform-Claude%20Code-D97757.svg" alt="Platform: Claude Code"></a>
   <a href="hooks/register.ts"><img src="https://img.shields.io/badge/Type-Function%20hooks%20mod-6E7681.svg" alt="Function hooks mod"></a>
-  <a href="hooks/register.test.ts"><img src="https://img.shields.io/badge/Tests-19%20passing-3FB950.svg" alt="19 tests passing"></a>
+  <a href="hooks/register.test.ts"><img src="https://img.shields.io/badge/Tests-24%20passing-3FB950.svg" alt="24 tests passing"></a>
 </p>
 
 <p align="center">
@@ -91,8 +91,8 @@ Once installed, there is nothing to configure. Ask Claude to run your tests; whe
 
 | Command | Effect |
 | --- | --- |
-| `/node-close` | List every orphaned Node and Node-project tool on the machine, with PID, CPU use, run time and command |
-| `/node-close kill <PID ...>` | End the listed processes you name, with what runs beneath them |
+| `/node-close` | List every orphaned Node and Node-project tool on the machine, with what runs beneath each indented under it, and their PID, CPU use, run time and command |
+| `/node-close kill <PID ...>` | End the listed processes you name, with what runs beneath them; any argument that is not a PID ends nothing and shows the usage |
 | `/node-close kill all` | End every listed process |
 
 `/node-close` lists processes Claude did not start too, such as a server you run under launchd, so check the list before `kill all`. Only you can run `kill`: when Claude or another plugin runs the command, it is refused.
@@ -100,7 +100,9 @@ Once installed, there is nothing to configure. Ask Claude to run your tests; whe
 ### Limitations
 
 - Only commands Claude runs through Bash or PowerShell are checked, not commands you run yourself.
+- **Another session's Node can be ended.** A leftover is any Node that appeared on the machine while the command ran and has lost its parent; the mod cannot yet tell whether this command started it. If another Claude session, an agent or you start a long-running Node with `nohup`, `&` or `pm2` while a long command runs here, it can be ended when that command finishes. The same holds for a background command's processes, which are ended at the session's end. Keep that in mind when several sessions run at once.
 - Nothing runs when Claude Code is killed outright (`SIGKILL`, a crash, the app force-quit), so its background commands can still be left behind. Use `/node-close` in the next session to find them.
+- On Windows, `/node-close` shows run time but not CPU use, which `Win32_Process` does not give.
 - Background commands are checked every 30 seconds while any are tracked; on Windows each check takes about a second of PowerShell.
 - A command is checked only when it may start Node: it names `node`, `npm`, `npx`, `pnpm`, `yarn`, `bun`, a common test or build tool, a `.js`, `.ts` or `.sh` file, or `make`. A Node started by some other wrapper is not cleaned up.
 - A Node that keeps its parent alive, for example under a daemon that stays running, is not counted as a leftover.

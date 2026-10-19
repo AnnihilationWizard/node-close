@@ -1,6 +1,19 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
-import { SWEEP_MS, count, grow, isNode, isNodeFamily, leftovers, orphans, parsePs } from './register'
+import {
+  SWEEP_MS,
+  count,
+  formatElapsed,
+  grow,
+  isNode,
+  isNodeFamily,
+  leftovers,
+  orphans,
+  parseArgs,
+  parseCimUsage,
+  parsePs,
+  tree,
+} from './register'
 
 const ps = (...rows: [number, number, string][]) => rows.map(([pid, ppid, c]) => `  ${pid}  ${ppid} ${c}`).join('\n')
 
@@ -219,4 +232,44 @@ test('says how many are Node when it keeps a tree on Windows', async ($, on) => 
   world(on, [before, after])
   const r = await $.tool.call({ tool: 'Bash', command: "Start-Process node -ArgumentList '-e','x'" })
   expect(r.context?.join('\n')).toMatch(/left 1 Node process and 1 helper process running on purpose/)
+})
+
+test('reads Windows elapsed time from CreationDate seconds', () => {
+  expect(formatElapsed(5)).toBe('00:05')
+  expect(formatElapsed(3 * 3600 + 62)).toBe('03:01:02')
+  expect(formatElapsed(2 * 86_400 + 3600)).toBe('2-01:00:00')
+  expect(parseCimUsage('13004 954\r\n22304 953\r\n').get(13004)).toEqual({ cpu: '-', elapsed: '15:54' })
+})
+
+test('refuses /node-close kill arguments that are not PIDs', () => {
+  expect(parseArgs('')).toEqual({ list: true })
+  expect(parseArgs('kill all')).toEqual({ kill: 'all' })
+  expect(parseArgs('kill 13004 22304')).toEqual({ kill: [13004, 22304] })
+  // The previous output pasted back in: nothing is read as a PID.
+  expect(parseArgs('kill 13004 Ended 1 Node process.')).toEqual({ usage: 'Not a PID: Ended Node process.' })
+  expect(parseArgs('kill')).toEqual({ usage: 'Name the PIDs to end, or all.' })
+  expect(parseArgs('kil 1')).toEqual({ usage: 'Unknown argument: kil' })
+})
+
+test('orders the listing as orphans with what runs beneath them', () => {
+  const procs = parsePs(ps([13004, 1, 'node -e x'], [22304, 13004, 'conhost.exe 0x4'], [911, 1, ESBUILD]))
+  expect(tree(procs).map(r => [r.proc.pid, r.depth])).toEqual([[13004, 0], [22304, 1], [911, 0]])
+})
+
+const CONHOST = '\\??\\C:\\Windows\\system32\\conhost.exe 0x4'
+
+test('/node-close names orphans apart from what runs beneath them, in a code block', async ($, on) => {
+  world(on, [ps(APP, CLAUDE, [13004, 1, '/usr/local/bin/node -e x'], [22304, 13004, CONHOST])])
+  const listed = await $.command.run({ command: 'node-close', args: '' } as never)
+  expect(listed.text).toMatch(/^1 Node process whose parent is gone, with 1 process beneath it/)
+  expect(listed.text).toContain('```')
+  expect(listed.text).toContain(`└─ ${CONHOST}`)
+})
+
+test('/node-close kill with a stray word ends nothing and shows usage', async ($, on) => {
+  const w = world(on, [STRANDED])
+  const r = await $.command.run({ command: 'node-close', args: 'kill 900 Ended 1' } as never)
+  expect(r.text).toMatch(/Not a PID: Ended/)
+  expect(r.text).toMatch(/Nothing was ended/)
+  expect(w.kills).toEqual([])
 })

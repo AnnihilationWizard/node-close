@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.2] - 2026-10-19
+
+- `/node-close` shows run time on Windows, from each process's `CreationDate`; CPU use stays `-` there, and the listing and README say so.
+- `/node-close kill` ends nothing and shows its usage when any argument is not a PID. Before, `kill 13004 Ended 1 Node process.` read the `1` as a PID.
+- The `/node-close` heading counts only the orphans, with what runs beneath them counted apart, and the listing shows each one's processes indented beneath it.
+- The listing is in a code block, so backslashes in Windows paths are kept and the columns stay aligned.
+- On macOS and Linux, `/node-close kill <PID>` also ends what runs beneath that PID, as `taskkill /T` does on Windows.
+- The README now warns that a Node another session starts while a command runs here can be counted as that command's leftover and ended.
+
 ## [1.1.1] - 2026-10-19
 
 - Count Node apart from the helpers beneath it in every note, toast and `/node-close` listing. On Windows, a kept `node.exe` with its `conhost.exe` was reported as "2 Node processes"; it is now "1 Node process and 1 helper process".
@@ -26,6 +35,7 @@ Initial release of node-close by AnnihilationWizard.
 
 Built on Claude Code's early-access function-hooks mod API.
 
+[1.1.2]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.2
 [1.1.1]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.1
 [1.1.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.1.0
 [1.0.0]: https://github.com/AnnihilationWizard/node-close/releases/tag/v1.0.0
