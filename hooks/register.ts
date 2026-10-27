@@ -127,7 +127,7 @@ const strays = (procs: readonly Proc[], isOwn: (p: Proc) => boolean, isOrphanOnl
 export const leftovers = (before: ReadonlySet<number>, procs: readonly Proc[]): Proc[] =>
   strays(procs, p => !before.has(p.pid))
 
-// A listing's own process: `ps` or PowerShell, with the arguments above.
+// A listing's own process: `ps` or PowerShell, with the arguments below.
 const isListing = (command: string) => /pid=,ppid=|Get-CimInstance Win32_Process \| ForEach-Object/.test(command)
 
 // The processes above a listing: Claude Code itself and what started it.
@@ -193,6 +193,12 @@ export const WIN_ENV_CLASS =
   'if (entry.StartsWith(name + "=", StringComparison.OrdinalIgnoreCase)) return entry.Substring(name.Length + 1); ' +
   'return ""; } finally { CloseHandle(h); } } }'
 
+// Windows PowerShell writes piped output in the console's code page (cp950
+// on Traditional Chinese Windows, say), which garbles non-ASCII command
+// lines; each script first switches it to UTF-8, going on as before where
+// it cannot (no console).
+export const UTF8_OUTPUT = 'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}; '
+
 // The PowerShell that prints `pid value` for each process whose environment
 // it read (an empty value when CLAUDE_PID is absent).
 export const winEnv = (pids: readonly number[]): string[] => [
@@ -200,7 +206,8 @@ export const winEnv = (pids: readonly number[]): string[] => [
   '-NoProfile',
   '-NonInteractive',
   '-Command',
-  `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition '${WIN_ENV_CLASS}'; ` +
+  UTF8_OUTPUT +
+    `$ErrorActionPreference = 'Stop'; Add-Type -TypeDefinition '${WIN_ENV_CLASS}'; ` +
     `foreach ($p in @(${pids.join(',')})) { $v = [NodeCloseEnv]::Get($p, 'CLAUDE_PID'); if ($null -ne $v) { "$p $v" } }`,
 ]
 
@@ -348,7 +355,8 @@ export const CIM: readonly string[] = [
   '-NoProfile',
   '-NonInteractive',
   '-Command',
-  'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }) $($_.CommandLine)" }',
+  UTF8_OUTPUT +
+    'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }) $($_.CommandLine)" }',
 ]
 // `ps` with CPU use and elapsed time, for the `/node-close` listing.
 export const PS_USAGE: readonly string[] = ['ps', '-axww', '-o', 'pid=,ppid=,pcpu=,etime=,command=']
@@ -359,7 +367,8 @@ export const CIM_USAGE: readonly string[] = [
   '-NoProfile',
   '-NonInteractive',
   '-Command',
-  'Get-CimInstance Win32_Process | Where-Object CreationDate | ForEach-Object { "$($_.ProcessId) $([long]((Get-Date) - $_.CreationDate).TotalSeconds)" }',
+  UTF8_OUTPUT +
+    'Get-CimInstance Win32_Process | Where-Object CreationDate | ForEach-Object { "$($_.ProcessId) $([long]((Get-Date) - $_.CreationDate).TotalSeconds)" }',
 ]
 
 // The listing that worked last, tried first next time.

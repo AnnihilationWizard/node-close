@@ -18,6 +18,9 @@ import {
   parseClaudePids,
   parseWinClaudePids,
   WIN_ENV_CLASS,
+  CIM,
+  CIM_USAGE,
+  UTF8_OUTPUT,
   winEnv,
   parseCimUsage,
   parsePs,
@@ -515,4 +518,16 @@ test('on Windows, ends a leftover with taskkill /F at once, with no grace', asyn
   expect(w.kills).toEqual([['taskkill', '/T', '/F', '/PID', '47284']])
   expect(slept).toBe(0)
   expect(r.context?.join('\n')).toMatch(/now ended: 47284 /)
+})
+
+test('has PowerShell write UTF-8, and still knows its own listing by its command line', () => {
+  for (const argv of [CIM, CIM_USAGE, winEnv([18052])]) expect(argv[4]!.startsWith(UTF8_OUTPUT)).toBe(true)
+  // The listing as Windows shows it, its script quoted by Node.
+  const listing = `${CIM.slice(0, 4).join(' ')} "${CIM[4]!.replace(/"/g, '\\"')}"`
+  const procs = parsePs(['60 4 C:\\Users\\me\\.local\\bin\\claude.exe', '44432 60 C:\\Windows\\system32\\cmd.exe /c powershell.exe', `50000 44432 ${listing}`].join('\r\n'))
+  expect([...ownClaude(procs)]).toEqual([60])
+  // A Chinese user folder comes through, and a leading byte order mark does not break the first line.
+  const [first, node] = parsePs('\uFEFF4 0 0 System\r\n47284 7000 134368848000000000 "C:\\Program Files\\nodejs\\node.exe" C:\\Users\\王小明\\p\\x.js\r\n')
+  expect(first?.pid).toBe(4)
+  expect(node?.command).toBe('"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\王小明\\p\\x.js')
 })
