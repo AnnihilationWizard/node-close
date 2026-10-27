@@ -15,6 +15,21 @@ const MAY_START_NODE =
 const KEEPS_RUNNING =
   /(^|[^&>|])&(?![&>])|\b(nohup|disown|setsid|pm2|forever|daemon(ize)?)\b|start-process|--daemon\b|--detach\b/i
 
+// In PowerShell, an `&` that begins a statement is the call operator
+// (`& node x.js`, `& "C:\Program Files\nodejs\node.exe" x.js`), not a
+// background one; only a later `&` (PowerShell 7) backgrounds.
+const CALL_OPERATOR = /(^|[;|{(\r\n]|&&)(\s*)&(?![&>])/g
+
+// PowerShell jobs run on after the command too.
+const STARTS_JOB = /\bstart-(thread)?job\b/i
+
+// Whether a command of the shell tool `tool` leaves a process running on
+// purpose.
+export const keepsRunning = (command: string, tool: string) =>
+  tool === 'PowerShell'
+    ? KEEPS_RUNNING.test(command.replace(CALL_OPERATOR, '$1$2')) || STARTS_JOB.test(command)
+    : KEEPS_RUNNING.test(command)
+
 // `started`: when the process started, in seconds since the epoch, where the
 // listing gives it.
 export type Proc = { pid: number; ppid: number; command: string; started?: number }
@@ -562,7 +577,7 @@ const guard: Hook<'tool.call'> = async ($, e, next) => {
   const ran = await next(e)
   if (before === undefined || ran.deny !== undefined) return withNotes(ran)
   const isBefore = new Set(before.map(p => p.pid))
-  const isKept = KEEPS_RUNNING.test(command)
+  const isKept = keepsRunning(command, e.tool)
 
   // A background command, or one that outran its timeout or that the person
   // backgrounded, is still running: its processes are tracked, and ended once

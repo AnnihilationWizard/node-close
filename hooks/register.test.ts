@@ -8,6 +8,7 @@ import {
   grow,
   isNode,
   isNodeFamily,
+  keepsRunning,
   leftovers,
   mine,
   orphans,
@@ -102,8 +103,9 @@ const world = (
     toasts.push((e as { text: string }).text)
     return { value: undefined } as never
   })
-  on('tool.call', { tool: 'Bash' }, ($, e) => {
-    ran.push(e.command)
+  // Bash or PowerShell: PowerShell is not in every build's tool types.
+  on('tool.call', ($, e) => {
+    ran.push((e as { command: string }).command)
     return { result: { stdout: 'ok', stderr: '', interrupted: false, ...opts.result } } as never
   })
   return { kills, ran, toasts }
@@ -421,4 +423,37 @@ test('on Windows, falls back to the older rule and says so when PowerShell refus
   const r = await $.tool.call({ tool: 'Bash', command: 'node spawn-worker.js' })
   expect(w.kills[0]).toEqual(['taskkill', '/T', '/PID', '47284', '/PID', '48000'])
   expect(r.context?.join('\n')).toMatch(/PowerShell refused the helper/)
+})
+
+test('reads a PowerShell `&` that begins a statement as the call operator, not as background', () => {
+  expect(keepsRunning('& node spawn-worker.js', 'PowerShell')).toBe(false)
+  expect(keepsRunning('& "C:\\Program Files\\nodejs\\node.exe" x.js', 'PowerShell')).toBe(false)
+  expect(keepsRunning('cd C:\\p; & npx vitest run', 'PowerShell')).toBe(false)
+  expect(keepsRunning('$out = $(& node x.js 2>&1)', 'PowerShell')).toBe(false)
+  expect(keepsRunning('npm ci && & npx vitest run', 'PowerShell')).toBe(false)
+  // A trailing `&` (PowerShell 7), Start-Process and jobs still keep their processes.
+  expect(keepsRunning('& node server.js &', 'PowerShell')).toBe(true)
+  expect(keepsRunning('node server.js &', 'PowerShell')).toBe(true)
+  expect(keepsRunning("Start-Process node -ArgumentList 'server.js'", 'PowerShell')).toBe(true)
+  expect(keepsRunning('Start-Job { node server.js }', 'PowerShell')).toBe(true)
+  expect(keepsRunning('Start-ThreadJob { node server.js }', 'PowerShell')).toBe(true)
+  // Bash is read as before.
+  expect(keepsRunning('node server.js &', 'Bash')).toBe(true)
+  expect(keepsRunning('npm ci && npx vitest run 2>&1', 'Bash')).toBe(false)
+  expect(keepsRunning('nohup node server.js > log 2>&1', 'Bash')).toBe(true)
+})
+
+test('on Windows, ends what a PowerShell `& node` command left', async ($, on) => {
+  const tables = [WIN_IDLE, WIN_LEFT]
+  const w = world(on, tables, { isWindows: true, winEnv: '47284 60\r\n48000 555\r\n', onKill: () => tables.push(WIN_IDLE) })
+  const r = await $.tool.call({ tool: 'PowerShell', command: '& "C:\\Program Files\\nodejs\\node.exe" spawn-worker.js' } as never)
+  expect(w.kills[0]?.slice(-2)).toEqual(['/PID', '47284'])
+  expect(r.context?.join('\n')).toMatch(/now ended: 47284 /)
+})
+
+test('on Windows, keeps what a PowerShell job runs', async ($, on) => {
+  const w = world(on, [WIN_IDLE, WIN_LEFT], { isWindows: true, winEnv: '47284 60\r\n48000 555\r\n' })
+  const r = await $.tool.call({ tool: 'PowerShell', command: 'Start-Job { node server.js }' } as never)
+  expect(w.kills).toEqual([])
+  expect(r.context?.join('\n')).toMatch(/on purpose, so they were kept: 47284 /)
 })
