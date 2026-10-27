@@ -405,7 +405,7 @@ test('on Windows, ends its own leftover and leaves another session\'s', async ($
   const tables = [WIN_IDLE, WIN_LEFT]
   const w = world(on, tables, { isWindows: true, winEnv: '47284 60\r\n48000 555\r\n', onKill: () => tables.push(WIN_IDLE) })
   const r = await $.tool.call({ tool: 'Bash', command: 'node spawn-worker.js' })
-  expect(w.kills[0]).toEqual(['taskkill', '/T', '/PID', '47284'])
+  expect(w.kills[0]).toEqual(['taskkill', '/T', '/F', '/PID', '47284'])
   expect(r.context?.join('\n')).not.toMatch(/48000/)
 })
 
@@ -414,7 +414,7 @@ test('on Windows, keeps and reports a leftover whose environment it cannot open'
   const tables = [WIN_IDLE, WIN_LEFT]
   const w = world(on, tables, { isWindows: true, winEnv: '47284 60\r\n', onKill: () => tables.push(WIN_IDLE) })
   const r = await $.tool.call({ tool: 'Bash', command: 'node spawn-worker.js' })
-  expect(w.kills[0]).toEqual(['taskkill', '/T', '/PID', '47284'])
+  expect(w.kills[0]).toEqual(['taskkill', '/T', '/F', '/PID', '47284'])
   expect(r.context?.join('\n')).toMatch(/carry no CLAUDE_PID.*they were kept: 48000 /)
 })
 
@@ -422,7 +422,7 @@ test('on Windows, falls back to the older rule and says so when PowerShell refus
   const tables = [WIN_IDLE, WIN_LEFT]
   const w = world(on, tables, { isWindows: true, winEnvExit: 1, onKill: () => tables.push(WIN_IDLE) })
   const r = await $.tool.call({ tool: 'Bash', command: 'node spawn-worker.js' })
-  expect(w.kills[0]).toEqual(['taskkill', '/T', '/PID', '47284', '/PID', '48000'])
+  expect(w.kills[0]).toEqual(['taskkill', '/T', '/F', '/PID', '47284', '/PID', '48000'])
   expect(r.context?.join('\n')).toMatch(/PowerShell refused the helper/)
 })
 
@@ -501,4 +501,18 @@ test('does not follow a tracked process to an older one that names its reused PI
     { pid: 950, ppid: 880, command: OTHER, started: 500 },
   ]
   expect(grow(tracked, procs).map(p => p.pid)).toEqual([880, 900])
+})
+
+test('on Windows, ends a leftover with taskkill /F at once, with no grace', async ($, on) => {
+  let slept = 0
+  on('clock.sleep', () => {
+    slept++
+    return { value: undefined }
+  })
+  const tables = [WIN_IDLE, WIN_LEFT]
+  const w = world(on, tables, { isWindows: true, isClockMocked: true, winEnv: '47284 60\r\n48000 555\r\n', onKill: () => tables.push(WIN_IDLE) })
+  const r = await $.tool.call({ tool: 'PowerShell', command: 'node spawn-worker.js' } as never)
+  expect(w.kills).toEqual([['taskkill', '/T', '/F', '/PID', '47284']])
+  expect(slept).toBe(0)
+  expect(r.context?.join('\n')).toMatch(/now ended: 47284 /)
 })

@@ -478,14 +478,22 @@ const end = async ($: EngineInterface, pids: readonly number[], isForced: boolea
 // How long ended processes get to exit before they are killed outright.
 export const GRACE_MS = 1000
 
-// Ends processes: TERM, a grace, then KILL for any still there. Resolves the
-// ones that survived both.
+// Whether ending a process can only be forced: on Windows, `taskkill`
+// without /F fails for console processes such as node.exe, and Node there
+// gets no TERM to handle anyway.
+const isForcedOnly = () => lister === CIM
+
+// Ends processes: TERM, a grace, then KILL for any still there (on Windows,
+// `taskkill /F` at once). Resolves the ones that survived.
 const close = async ($: EngineInterface, targets: readonly Proc[], graceMs = GRACE_MS): Promise<Proc[]> => {
   const isTarget = (p: Proc) => targets.some(t => isSame(t, p))
-  await end($, targets.map(p => p.pid), false)
-  await $.clock.sleep(graceMs)
-  const stuck = ((await list($)) ?? []).filter(isTarget)
-  if (stuck.length === 0) return []
+  let stuck: readonly Proc[] = targets
+  if (!isForcedOnly()) {
+    await end($, targets.map(p => p.pid), false)
+    await $.clock.sleep(graceMs)
+    stuck = ((await list($)) ?? []).filter(isTarget)
+    if (stuck.length === 0) return []
+  }
   await end($, stuck.map(p => p.pid), true)
   return ((await list($)) ?? []).filter(isTarget)
 }
@@ -663,10 +671,10 @@ const atEnd: Hook<'session.end'> = async ($, e, next) => {
     const alive = grow(known, procs)
     const left = strays(procs, p => alive.some(a => a.pid === p.pid), false)
     if (left.length > 0) {
-      await end($, left.map(p => p.pid), false)
+      await end($, left.map(p => p.pid), isForcedOnly())
       // Kill outright what has not exited, if the session's short exit bound
       // leaves time to look.
-      if (next.budget.remainingMs > 1500) {
+      if (!isForcedOnly() && next.budget.remainingMs > 1500) {
         await $.clock.sleep(500, { signal: next.signal })
         const stuck = ((await list($)) ?? []).filter(p => left.some(l => isSame(l, p)))
         await end($, stuck.map(p => p.pid), true)

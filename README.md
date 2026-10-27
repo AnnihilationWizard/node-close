@@ -35,7 +35,7 @@ Some leftovers outlive any hook: Claude Code killed outright, an IDE task, anoth
 
 ## Features
 
-- **Ends leftovers at once:** After a Bash or PowerShell command finishes, Node processes it started that are still running are sent `SIGTERM`, then `SIGKILL` after one second if they stay (`taskkill /T` on Windows).
+- **Ends leftovers at once:** After a Bash or PowerShell command finishes, Node processes it started that are still running are sent `SIGTERM`, then `SIGKILL` after one second if they stay. On Windows they are ended with `taskkill /T /F` at once: Node there gets no signal it could handle, and `taskkill` without `/F` cannot end it.
 - **Takes their tools too:** A Node's workers, and tools a Node project installed under `node_modules` such as esbuild, swc or turbo, go with it, even when the Node that started them has already exited.
 - **Only what the command left:** A process counts only when it is new since the command started **and** has lost its parent, re-parented to launchd/init or, on Windows, pointing at a parent that no longer exists, or at a newer process that has since taken its PID. It must also carry this Claude Code's `CLAUDE_PID`, which Claude Code sets in every shell it starts, so a Node another session or you start in the meantime is left alone. On Windows the mod reads it from each candidate's memory with a small helper PowerShell compiles (64-bit processes only).
 - **Keeps what you meant to keep:** Node running before the command, your own servers, other sessions and processes still owned by a running parent are never touched.
@@ -47,7 +47,7 @@ Some leftovers outlive any hook: Claude Code killed outright, an IDE task, anoth
 | Situation | What node-close does |
 | --- | --- |
 | `npx vitest run` finishes, its runner and workers keep running | Ends them, tells Claude which PIDs |
-| A process ignores `SIGTERM` | Kills it after one second; reports any that still remain |
+| A process ignores `SIGTERM` | Kills it after one second (at once on Windows); reports any that still remain |
 | `nohup node server.js &` | Keeps it, tells Claude how to end it later |
 | `npm run dev` with `run_in_background`, or moved to the background | Leaves it running; ends what it leaves once it stops, or at session end |
 | An esbuild spinning after its `tsx watch` and session are gone | `/node-close` lists it with its CPU use; `/node-close kill <PID>` ends it |
