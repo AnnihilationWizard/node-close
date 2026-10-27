@@ -80,14 +80,29 @@ export const isNode = (command: string) => /(^|[\\/"'])node(js)?(\.exe)?["']?(\s
 export const isNodeFamily = (command: string) =>
   isNode(command) || /[\\/]node_modules[\\/]/i.test(executable(command))
 
-const hasLostParent = (p: Proc, byPid: ReadonlyMap<number, Proc>) =>
-  p.ppid === 1 || p.ppid === 0 || !byPid.has(p.ppid)
+// How far apart two listings may place one start time: each derives it from
+// its own clock reading and whole seconds.
+export const START_SLACK_S = 2
+
+// The process `p` names as its parent, if it is that parent: a process that
+// started after `p` only got its parent's PID once the parent had exited, as
+// Windows soon reuses PIDs.
+export const parentOf = (p: Proc, byPid: ReadonlyMap<number, Proc>): Proc | undefined => {
+  const parent = byPid.get(p.ppid)
+  return parent === undefined || p.started === undefined || parent.started === undefined || parent.started <= p.started + START_SLACK_S
+    ? parent
+    : undefined
+}
+
+export const hasLostParent = (p: Proc, byPid: ReadonlyMap<number, Proc>) =>
+  p.ppid === 1 || p.ppid === 0 || parentOf(p, byPid) === undefined
 
 // The processes among `isOwn` that are left behind: in a tree of own processes
 // whose top has lost its parent (re-parented to launchd/init, or on Windows
-// pointing at a parent that no longer exists), or any tree when `isOrphanOnly`
-// is false, and with Node or a Node project's tool at or above them in that
-// tree, so a Node's esbuild or worker goes with it.
+// pointing at a parent that no longer exists or whose PID a newer process
+// took), or any tree when `isOrphanOnly` is false, and with Node or a Node
+// project's tool at or above them in that tree, so a Node's esbuild or
+// worker goes with it.
 const strays = (procs: readonly Proc[], isOwn: (p: Proc) => boolean, isOrphanOnly = true): Proc[] => {
   const byPid = new Map(procs.map(p => [p.pid, p]))
   return procs.filter(p => {
@@ -96,7 +111,7 @@ const strays = (procs: readonly Proc[], isOwn: (p: Proc) => boolean, isOrphanOnl
     let top = p
     const seen = new Set([p.pid])
     for (;;) {
-      const parent = byPid.get(top.ppid)
+      const parent = parentOf(top, byPid)
       if (parent === undefined || !isOwn(parent) || seen.has(parent.pid)) break
       seen.add(parent.pid)
       top = parent
@@ -119,7 +134,7 @@ const isListing = (command: string) => /pid=,ppid=|Get-CimInstance Win32_Process
 const ownChain = (procs: readonly Proc[], byPid: ReadonlyMap<number, Proc>): Set<number> => {
   const chain = new Set<number>()
   for (const p of procs.filter(q => isListing(q.command)))
-    for (let up = byPid.get(p.ppid); up !== undefined && !chain.has(up.pid); up = byPid.get(up.ppid)) chain.add(up.pid)
+    for (let up = parentOf(p, byPid); up !== undefined && !chain.has(up.pid); up = parentOf(up, byPid)) chain.add(up.pid)
   return chain
 }
 
@@ -134,7 +149,7 @@ export const ownClaude = (procs: readonly Proc[]): Set<number> => {
   const own = new Set<number>()
   for (const listing of procs.filter(p => isListing(p.command))) {
     let found: number | undefined
-    for (let up = byPid.get(listing.ppid), seen = new Set<number>(); up !== undefined && !seen.has(up.pid); up = byPid.get(up.ppid)) {
+    for (let up = parentOf(listing, byPid), seen = new Set<number>(); up !== undefined && !seen.has(up.pid); up = parentOf(up, byPid)) {
       seen.add(up.pid)
       if (isClaude(up.command)) {
         found = up.pid
@@ -236,7 +251,7 @@ export const owners = (
   const byPid = new Map(candidates.map(c => [c.pid, c]))
   // The nearest CLAUDE_PID at or above `p` among the candidates.
   const claudeOf = (p: Proc): number | undefined => {
-    for (let q: Proc | undefined = p, seen = new Set<number>(); q !== undefined && !seen.has(q.pid); q = byPid.get(q.ppid)) {
+    for (let q: Proc | undefined = p, seen = new Set<number>(); q !== undefined && !seen.has(q.pid); q = parentOf(q, byPid)) {
       seen.add(q.pid)
       const claude = claudePids.get(q.pid)
       if (claude !== undefined) return claude
@@ -274,7 +289,7 @@ export const orphans = (procs: readonly Proc[]): Proc[] => {
   while (grew) {
     grew = false
     for (const p of procs)
-      if (!found.has(p.pid) && !own.has(p.pid) && found.has(p.ppid)) {
+      if (!found.has(p.pid) && !own.has(p.pid) && found.has(p.ppid) && parentOf(p, byPid) !== undefined) {
         found.set(p.pid, p)
         grew = true
       }
@@ -284,19 +299,15 @@ export const orphans = (procs: readonly Proc[]): Proc[] => {
 
 // The listing's order: each orphan, then what runs beneath it, with how deep.
 export const tree = (procs: readonly Proc[]): { proc: Proc; depth: number }[] => {
-  const pids = new Set(procs.map(p => p.pid))
+  const byPid = new Map(procs.map(p => [p.pid, p]))
   const out: { proc: Proc; depth: number }[] = []
   const visit = (p: Proc, depth: number) => {
     out.push({ proc: p, depth })
-    for (const child of procs) if (child.ppid === p.pid && child.pid !== p.pid) visit(child, depth + 1)
+    for (const child of procs) if (child.ppid === p.pid && child.pid !== p.pid && parentOf(child, byPid) !== undefined) visit(child, depth + 1)
   }
-  for (const root of procs.filter(p => !pids.has(p.ppid))) visit(root, 0)
+  for (const root of procs.filter(p => parentOf(p, byPid) === undefined)) visit(root, 0)
   return out
 }
-
-// How far apart two listings may place one start time: each derives it from
-// its own clock reading and whole seconds.
-export const START_SLACK_S = 2
 
 // Whether `a` and `b` started at the same moment, as far as both are known.
 const sameStart = (a: Tracked, b: Tracked) =>
@@ -315,12 +326,13 @@ const toTracked = ({ pid, command, started }: Proc): Tracked => (started === und
 // often replaces itself with it (`zsh -c 'node x.js'` becomes `node x.js`
 // under the same PID and start), while a reused PID starts later.
 export const grow = (tracked: readonly Tracked[], procs: readonly Proc[]): Proc[] => {
+  const byPid = new Map(procs.map(p => [p.pid, p]))
   const found = new Map(procs.filter(p => tracked.some(t => t.pid === p.pid && sameStart(t, p))).map(p => [p.pid, p]))
   let grew = true
   while (grew) {
     grew = false
     for (const p of procs)
-      if (!found.has(p.pid) && found.has(p.ppid)) {
+      if (!found.has(p.pid) && found.has(p.ppid) && parentOf(p, byPid) !== undefined) {
         found.set(p.pid, p)
         grew = true
       }
@@ -734,11 +746,12 @@ const command: Hook<'command.run'> = async ($, e) => {
   const pids = asked.kill === 'all' ? found.map(p => p.pid) : asked.kill
   // A named PID takes what runs beneath it, as `taskkill /T` does on Windows.
   const named = new Set(pids.filter(pid => found.some(p => p.pid === pid)))
+  const byPid = new Map(found.map(p => [p.pid, p]))
   let grew = true
   while (grew) {
     grew = false
     for (const p of found)
-      if (!named.has(p.pid) && named.has(p.ppid)) {
+      if (!named.has(p.pid) && named.has(p.ppid) && parentOf(p, byPid) !== undefined) {
         named.add(p.pid)
         grew = true
       }

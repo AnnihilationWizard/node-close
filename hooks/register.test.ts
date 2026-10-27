@@ -13,6 +13,7 @@ import {
   mine,
   orphans,
   ownClaude,
+  parentOf,
   parseArgs,
   parseClaudePids,
   parseWinClaudePids,
@@ -456,4 +457,48 @@ test('on Windows, keeps what a PowerShell job runs', async ($, on) => {
   const r = await $.tool.call({ tool: 'PowerShell', command: 'Start-Job { node server.js }' } as never)
   expect(w.kills).toEqual([])
   expect(r.context?.join('\n')).toMatch(/on purpose, so they were kept: 47284 /)
+})
+
+// On Windows a PID is soon reused: an orphan's parent PID can belong to a
+// newer, unrelated process.
+const WIN_NODE = { pid: 47284, ppid: 7000, command: '"C:\\Program Files\\nodejs\\node.exe" -e x', started: 1000 }
+
+test('takes a parent PID reused by a newer process as a lost parent', () => {
+  const reused = { pid: 7000, ppid: 4, command: 'C:\\Windows\\system32\\svchost.exe', started: 1060 }
+  const real = { pid: 7000, ppid: 60, command: 'C:\\Windows\\system32\\cmd.exe /c node -e x', started: 990 }
+  expect(parentOf(WIN_NODE, new Map([[7000, reused]]))).toBeUndefined()
+  expect(parentOf(WIN_NODE, new Map([[7000, real]]))).toBe(real)
+  // Within a listing's slack, or with a start unknown, it is still the parent.
+  expect(parentOf(WIN_NODE, new Map([[7000, { ...reused, started: 1001 }]]))?.pid).toBe(7000)
+  expect(parentOf(WIN_NODE, new Map([[7000, { ...reused, started: undefined }]]))?.pid).toBe(7000)
+  const claude = { pid: 60, ppid: 4, command: 'C:\\Users\\me\\.local\\bin\\claude.exe', started: 900 }
+  expect(leftovers(new Set([4, 60, 7000]), [claude, reused, WIN_NODE]).map(p => p.pid)).toEqual([47284])
+  // A Node whose real parent still runs is left alone.
+  expect(leftovers(new Set([4, 60]), [claude, real, WIN_NODE])).toEqual([])
+})
+
+test('/node-close lists an orphan whose parent PID was reused, without the newer process beneath it', () => {
+  // A newer Node took a dead process's PID, 7000; the old console host still names 7000.
+  const reusedByNode = { pid: 7000, ppid: 1, command: 'node -e y', started: 1060 }
+  const conhost = { pid: 31028, ppid: 7000, command: 'C:\\Windows\\system32\\conhost.exe 0x4', started: 1000 }
+  const procs = [{ ...WIN_NODE, ppid: 7100 }, reusedByNode, conhost, { pid: 7100, ppid: 4, command: 'svchost.exe', started: 1100 }]
+  expect(orphans(procs).map(p => p.pid).sort((a, b) => a - b)).toEqual([7000, 47284])
+  expect(tree(procs).filter(r => r.proc.pid === 31028).map(r => r.depth)).toEqual([0])
+})
+
+test('on macOS and Linux, a running parent from ps elapsed time is still the parent', () => {
+  const now = Date.UTC(2026, 9, 19, 12, 0, 0)
+  const procs = parsePs(['   60     1  2-00:00:00 /Applications/Claude.app/Contents/MacOS/Claude', '   70    60  1-00:00:00 /usr/local/bin/node /usr/local/bin/claude', '  880    70    05:00 /bin/zsh -c x', '  900   880    04:59 /usr/local/bin/node x.js'].join('\n'), now)
+  expect(leftovers(new Set([60, 70]), procs)).toEqual([])
+  expect(orphans(procs)).toEqual([])
+})
+
+test('does not follow a tracked process to an older one that names its reused PID', () => {
+  const tracked = [{ pid: 880, command: BG_SHELL, started: 1000 }]
+  const procs = [
+    { pid: 880, ppid: 70, command: 'node x.js', started: 1000 },
+    { pid: 900, ppid: 880, command: 'node worker.js', started: 1010 },
+    { pid: 950, ppid: 880, command: OTHER, started: 500 },
+  ]
+  expect(grow(tracked, procs).map(p => p.pid)).toEqual([880, 900])
 })
