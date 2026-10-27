@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1] - 2026-10-27
+
+- Fix: in PowerShell, an `&` that begins a statement is the call operator (`& node x.js`, `& "C:\Program Files\nodejs\node.exe" x.js`), not a background one. Such commands were taken as keeping their processes on purpose, so their leftovers were reported instead of ended. A trailing `&` (PowerShell 7), `Start-Process`, and now `Start-Job` and `Start-ThreadJob` still keep them. Bash is read as before.
+- Fix: a parent PID that a newer process has taken counts as a lost parent. Windows reuses PIDs soon, so an orphan whose old parent's PID went to an unrelated process was missed. A process that started after its child is no longer taken as its parent wherever parent links are followed; a real parent always starts first, so macOS and Linux are unchanged.
+- On Windows, leftovers are ended with `taskkill /T /F` at once. `taskkill` without `/F` cannot end console processes such as `node.exe`, so the first try always failed and cost a second before the forced one.
+- On Windows, PowerShell writes its listings in UTF-8, so command lines with non-ASCII paths, such as a Chinese user folder, are no longer garbled.
+
 ## [1.3.0] - 2026-10-19
 
 - On Windows, a leftover must also carry this Claude Code's `CLAUDE_PID`, as on macOS and Linux, so a Node another session or you start while a command runs here is no longer ended. PowerShell compiles a small C# class with `Add-Type` that reads `CLAUDE_PID` from each candidate's environment block; 64-bit processes only.
